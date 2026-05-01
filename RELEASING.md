@@ -129,4 +129,4 @@ CHANGELOG. Common items:
 - Retry middleware for `RateLimitException` / transient 5xx
 - First-class video polling sugar (`postVideo($bytes, alt: ...)` one-shot helper)
 - `EmbeddedExternal` thumbnail auto-upload from a path
-- PHP 8.2+ readonly classes once we bump minimum
+- PHP 8.2 readonly classes for value objects (Did, Handle, AtUri, Refs)

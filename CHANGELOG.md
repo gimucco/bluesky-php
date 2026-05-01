@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 (no changes yet)
 
+## [0.2.0] - 2026-05-01
+
+### Changed
+
+- **Minimum PHP raised from 8.1 to 8.2.** PHP 8.1 reached end-of-life on 2025-12-31, so the floor moves to the lowest still-supported version. CI matrix updated accordingly (8.2 / 8.3 / 8.4).
+- **Bumped `gimucco/atproto-php` from `^0.1.2` to `^0.2`.** The new release upgrades `web-token/jwt-library` from `^3.3` to `^4`, which resolves install-time conflicts with modern transitive deps (`brick/math` ≥ 0.13, `paragonie/constant_time_encoding` ≥ 3, `symfony/console` ≥ 8). Consumers stuck on `^0.1.2` of atproto-php would fail to install alongside any of those.
+- Dev requirement `phpunit/phpunit` bumped from `^10.5` to `^11.0` (the latest line compatible with PHP 8.2). No production code changes — tests use no APIs that changed between PHPUnit 10 and 11.
+
 ## [0.1.0] - 2026-05-01
 
 Initial release of `gimucco/bluesky-php` — a typed PHP client for the Bluesky / AT Protocol API, built on `gimucco/atproto-php` for OAuth 2.1 / DPoP authentication.

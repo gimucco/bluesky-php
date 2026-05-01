@@ -57,7 +57,7 @@ composer require gimucco/bluesky-php
 composer require guzzlehttp/guzzle      # recommended HTTP client
 ```
 
-**Requirements:** PHP 8.1+, ext-json, ext-fileinfo, ext-curl, ext-openssl, ext-sodium (curl/openssl/sodium come from `gimucco/atproto-php`).
+**Requirements:** PHP 8.2+, ext-json, ext-fileinfo, ext-curl, ext-openssl, ext-sodium (curl/openssl/sodium come from `gimucco/atproto-php`).
 
 ## Authentication: OAuth only
 
