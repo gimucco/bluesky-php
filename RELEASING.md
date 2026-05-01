@@ -121,12 +121,37 @@ git commit -m "Regenerate from upstream lexicons"
 The SPDX identifier in `composer.json` must match exactly. Confirm
 `composer.json` has `"license": "GPL-2.0-or-later"` (not `GPLv2`).
 
-## Roadmap (post-0.1)
+## Roadmap
 
-See [README §Pagination](README.md#pagination) and the v0.2 notes in
-CHANGELOG. Common items:
+Loose backlog — none of these block any release, recorded so they
+don't get rediscovered later. PRs welcome.
 
-- Retry middleware for `RateLimitException` / transient 5xx
-- First-class video polling sugar (`postVideo($bytes, alt: ...)` one-shot helper)
-- `EmbeddedExternal` thumbnail auto-upload from a path
-- PHP 8.2 readonly classes for value objects (Did, Handle, AtUri, Refs)
+### Ergonomics
+
+- **Retry middleware** for `RateLimitException` / transient 5xx, driven
+  off `RateLimitException::$retryAfter`.
+- **`replyVideo()`** for parity with `postVideo()` — currently a video
+  reply is a two-call dance (`uploadVideo()` then `reply(video: ...)`).
+- **`EmbeddedExternal` thumbnail auto-upload** from a local file path
+  (today the caller has to upload the thumb to a `BlobRef` first).
+
+### Performance
+
+- **Streaming video uploads** via `CURLOPT_READFUNCTION` instead of
+  loading the full bytes into a `CURLOPT_POSTFIELDS` string. Today a
+  100 MB clip allocates 100 MB in PHP-land; streaming would be flat.
+  Not a problem at typical Bluesky video sizes (~50 MB cap), but
+  matters for self-hosted PDSes with relaxed limits.
+- **Service-auth token caching** by `lxm` for the 30 s TTL — currently
+  every video call mints a fresh JWT (one PDS round-trip, ~150 ms).
+  Caching cuts latency ~50 % on multi-call sequences. Adds session
+  state; only worth doing if profiling shows it matters.
+
+### Code quality
+
+- **PHP 8.2 readonly classes** for value objects (`Did`, `Handle`,
+  `AtUri`, the five `*Ref` classes). Composer minimum is already 8.2,
+  so this is a free type-safety win.
+- **Dedicated `CurlTransport` class** for `VideoService`'s HTTP path
+  if a second domain ever needs Bearer-auth-curl (currently inlined
+  as a closure — fine while it's one caller).

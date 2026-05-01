@@ -7,7 +7,7 @@ namespace Gimucco\Bluesky;
 use Closure;
 use Gimucco\Atproto\Session;
 use Gimucco\Bluesky\Exception\ApiException;
-use Gimucco\Bluesky\Exception\InvalidArgumentException;
+use Gimucco\Bluesky\Exception\BlueskyException;
 use Gimucco\Bluesky\Generated\Methods\Com\Atproto\Server;
 use Gimucco\Bluesky\Generated\Types\App\Bsky\Video\GetJobStatusOutput;
 use Gimucco\Bluesky\Generated\Types\App\Bsky\Video\GetUploadLimitsOutput;
@@ -19,14 +19,23 @@ use JsonException;
  * Routes video operations through the Bluesky video processing service
  * (default: video.bsky.app) instead of the user's PDS.
  *
- * Each call mints a short-lived service-auth JWT via the PDS and sends
- * it as a plain Bearer token to the video service. The service DID
- * (`aud` claim of the JWT) is auto-derived from the configured URL as
- * `did:web:<host>` so a custom `videoServiceUrl` works end-to-end.
+ * Each call mints a short-lived service-auth JWT via the user's PDS and
+ * sends it as a plain Bearer token to the video service. The token's
+ * audience (`aud`) is the user's **PDS** DID — `did:web:<pdsHost>` —
+ * not the video service's DID. The video service validates the token
+ * by checking it was issued by the PDS that hosts the user's account.
  */
 final class VideoService
 {
 	public const DEFAULT_VIDEO_SERVICE_URL = 'https://video.bsky.app';
+
+	/**
+	 * Lexicon-defined job states from `app.bsky.video.defs#jobStatus.knownValues`.
+	 * Treated as an open string set (the lexicon explicitly leaves room for new
+	 * states); only the two terminal values used by the polling loop are exposed.
+	 */
+	public const JOB_STATE_COMPLETED = 'JOB_STATE_COMPLETED';
+	public const JOB_STATE_FAILED = 'JOB_STATE_FAILED';
 
 	/** Connect timeout (S2S, local DNS + TLS handshake should be fast). */
 	private const CONNECT_TIMEOUT_SECONDS = 10;
@@ -35,16 +44,12 @@ final class VideoService
 	/** Total timeout for status / limits — small JSON request, should be quick. */
 	private const STATUS_TIMEOUT_SECONDS = 30;
 
-	private readonly string $serviceDid;
-
 	/** @var Closure(string, string, string, ?string, ?string, int): array<string, mixed> */
 	private readonly Closure $httpTransport;
 
 	/**
 	 * @param Session $session
 	 * @param Closure(string, string, string, ?string, ?string, int): array<string, mixed>|null $httpTransport Test seam — defaults to the curl transport.
-	 *
-	 * @throws InvalidArgumentException If `$videoServiceUrl` lacks a host component.
 	 */
 	public function __construct(
 		private readonly object $session,
@@ -52,7 +57,6 @@ final class VideoService
 		private readonly string $videoServiceUrl = self::DEFAULT_VIDEO_SERVICE_URL,
 		?Closure $httpTransport = null,
 	) {
-		$this->serviceDid = self::deriveServiceDid($videoServiceUrl);
 		$this->httpTransport = $httpTransport ?? self::curlTransport();
 	}
 
@@ -61,21 +65,59 @@ final class VideoService
 	 * carrying the `jobId` to poll via `getJobStatus()` (or use the higher-level
 	 * `Client::uploadVideo()` / `Client::awaitVideo()`).
 	 *
+	 * Handles two server-side quirks transparently:
+	 *
+	 * 1. The success response is flat (`{did, jobId, state}`) rather than
+	 *    wrapped under `jobStatus`. The lexicon-generated parser expects
+	 *    the wrapped form; we normalize before parsing.
+	 * 2. HTTP 409 with `error="already_exists"` means the bytes are a
+	 *    content-hash dedupe match — Bluesky already processed an identical
+	 *    upload (typically from a previous attempt that failed after upload
+	 *    but before post creation). The body carries a usable `jobId`; we
+	 *    convert it to a successful `UploadVideoOutput` so callers can pass
+	 *    the jobId straight to `awaitVideo()` / `getJobStatus()` and reuse
+	 *    the existing blob instead of re-uploading.
+	 *
 	 * @param string $bytes Raw video bytes
 	 * @param string $mimeType MIME type — defaults to "video/mp4"
 	 *
-	 * @throws ApiException On HTTP failure (4xx/5xx)
+	 * @throws ApiException On HTTP failure (4xx/5xx), except 409+already_exists.
 	 */
 	public function uploadVideo(string $bytes, string $mimeType = 'video/mp4'): UploadVideoOutput
 	{
-		$token = $this->mintServiceToken('app.bsky.video.uploadVideo');
+		// The video service authorizes uploads as generic `uploadBlob`
+		// operations — the JWT's `lxm` must reflect that, not the lexicon's
+		// `app.bsky.video.uploadVideo` method name. (`getJobStatus` and
+		// `getUploadLimits` use their own lexicon names; only upload
+		// re-routes to the repo blob lxm.)
+		$token = $this->mintServiceToken('com.atproto.repo.uploadBlob');
 		$query = http_build_query([
 			'did' => $this->session->did,
 			'name' => self::filenameForMime($mimeType),
 		]);
 		$url = $this->videoServiceUrl.'/xrpc/app.bsky.video.uploadVideo?'.$query;
 
-		$data = ($this->httpTransport)('POST', $url, $token, $bytes, $mimeType, self::UPLOAD_TIMEOUT_SECONDS);
+		try {
+			$data = ($this->httpTransport)('POST', $url, $token, $bytes, $mimeType, self::UPLOAD_TIMEOUT_SECONDS);
+		} catch (ApiException $e) {
+			$jobId = $e->body['jobId'] ?? null;
+			if ($e->status === 409 && $e->error === 'already_exists' && \is_string($jobId) && $jobId !== '') {
+				$data = [
+					'did' => $this->session->did,
+					'jobId' => $jobId,
+					'state' => \is_string($e->body['state'] ?? null) ? $e->body['state'] : self::JOB_STATE_COMPLETED,
+				];
+			} else {
+				throw $e;
+			}
+		}
+
+		// Wrap the flat shape `{did, jobId, state}` returned on success into
+		// the lexicon's expected `{jobStatus: {...}}` envelope.
+		if (!isset($data['jobStatus']) && isset($data['jobId'])) {
+			$data = ['jobStatus' => $data];
+		}
+
 		return UploadVideoOutput::fromArray($data);
 	}
 
@@ -108,29 +150,28 @@ final class VideoService
 		return GetUploadLimitsOutput::fromArray($data);
 	}
 
+	/**
+	 * The service-auth token's `aud` claim must identify the user's PDS
+	 * (`did:web:<pdsHost>`), not the video service. The video service
+	 * validates that the token was issued by the same PDS hosting the
+	 * user's account before accepting the upload. Derive the DID from
+	 * the live session's pdsUrl on every call rather than caching, so
+	 * a session-restore that updates the PDS URL is picked up.
+	 *
+	 * @throws BlueskyException If the session's pdsUrl has no host.
+	 */
 	private function mintServiceToken(string $lxm): string
 	{
+		$pdsHost = parse_url($this->session->pdsUrl, PHP_URL_HOST);
+		if (!\is_string($pdsHost) || $pdsHost === '') {
+			throw new BlueskyException('Cannot derive PDS DID from session pdsUrl: '.$this->session->pdsUrl);
+		}
+
 		return $this->server->getServiceAuth(
-			aud: $this->serviceDid,
+			aud: 'did:web:'.$pdsHost,
 			exp: time() + 30,
 			lxm: $lxm,
 		)->token;
-	}
-
-	/**
-	 * Derive the service DID from the URL's host as `did:web:<host>` —
-	 * matches how Bluesky publishes its service identifier and lets a
-	 * custom `videoServiceUrl` work without requiring a separate DID arg.
-	 *
-	 * @throws InvalidArgumentException If the URL has no host component.
-	 */
-	private static function deriveServiceDid(string $url): string
-	{
-		$host = parse_url($url, PHP_URL_HOST);
-		if (!\is_string($host) || $host === '') {
-			throw new InvalidArgumentException('videoServiceUrl must include a host: '.$url);
-		}
-		return 'did:web:'.$host;
 	}
 
 	/**
@@ -157,12 +198,12 @@ final class VideoService
 	{
 		return static function (string $method, string $url, string $token, ?string $body, ?string $contentType, int $timeoutSeconds): array {
 			if ($method === '') {
-				throw new Exception\BlueskyException('HTTP method must not be empty');
+				throw new BlueskyException('HTTP method must not be empty');
 			}
 
 			$ch = curl_init($url);
 			if ($ch === false) {
-				throw new Exception\BlueskyException('Failed to initialize curl');
+				throw new BlueskyException('Failed to initialize curl');
 			}
 
 			$headers = ['Authorization: Bearer '.$token];
@@ -189,10 +230,12 @@ final class VideoService
 			$response = curl_exec($ch);
 			$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 			$curlError = curl_error($ch);
-			curl_close($ch);
+			// $ch (CurlHandle) is auto-released when it falls out of scope on
+			// PHP 8.0+. curl_close() has been a no-op since 8.0 and emits a
+			// deprecation in 8.5, so we don't call it.
 
 			if (!\is_string($response)) {
-				throw new Exception\BlueskyException('Video service request failed: '.$curlError);
+				throw new BlueskyException('Video service request failed: '.$curlError);
 			}
 
 			// Decode defensively: a 502 from a CDN upstream is often HTML, not

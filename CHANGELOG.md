@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 (no changes yet)
 
+## [0.2.2] - 2026-05-01
+
+End-to-end testing of 0.2.1 against a real `bsky.social`-hosted account
+(PDS: `rhizopogon.us-west.host.bsky.network`) surfaced four bugs that
+prevented uploads from completing. All four are fixed; the full pipeline
+(CREATED → ENCODING → SCANNED → COMPLETED → blob → post) now works.
+
+### Fixed
+
+- **Service-auth `aud` claim must be the user's PDS DID, not the video service DID.** 0.2.1 minted tokens with `aud=did:web:video.bsky.app` (auto-derived from `videoServiceUrl`); the video service rejected with HTTP 401 — *"invalid token audience: should be the user's PDS DID `did:web:<pdsHost>`"*. `VideoService::mintServiceToken()` now derives `aud` from `$session->pdsUrl` on every call. The `$serviceDid` field, `deriveServiceDid()` helper, and constructor URL validation are removed; the docs that promised `did:web:<host of videoServiceUrl>` semantics are corrected.
+- **`lxm` for `uploadVideo` must be `com.atproto.repo.uploadBlob`, not `app.bsky.video.uploadVideo`.** The video service authorizes uploads as generic blob uploads — using the lexicon's own method name returned HTTP 401 *"invalid token lexicon method"*. Only the upload path is affected; `getJobStatus` and `getUploadLimits` keep their lexicon-defined `lxm` values.
+- **Upload response is flat (`{did, jobId, state}`), not wrapped under `jobStatus`.** The lexicon-generated `UploadVideoOutput::fromArray()` expected `{"jobStatus": {...}}` and crashed with *"Field "jobStatus": expected array, got null"*. `VideoService::uploadVideo()` now normalizes the flat shape into the wrapped envelope before parsing. (`getJobStatus` correctly returns the wrapped form — that path is unchanged.)
+- **HTTP 409 `already_exists` on upload is now treated as success, not an exception.** The Bluesky video service deduplicates uploads by content hash; re-uploading bytes Bluesky has already processed (e.g. from a previous attempt that failed after upload but before post creation) returns 409 with a perfectly valid `JOB_STATE_COMPLETED` body and a usable `jobId`. `VideoService::uploadVideo()` now intercepts this specific case and converts it to a successful `UploadVideoOutput`, so callers can pass the `jobId` straight to `awaitVideo()` / `getJobStatus()` to recover the existing blob. Other 409s (no `already_exists` error, no `jobId`) still surface as `ApiException`.
+
+### Changed
+
+- `ApiException` now exposes the raw decoded response body via `public readonly array $body`. Used by `VideoService::uploadVideo()` to recover the dedupe `jobId` from a 409, and useful generally for endpoints whose error responses carry application-level signals. The constructor signature gained an optional `array $body = []` parameter before `$previous`; subclasses (`NotFoundException`, `AuthException`, `ValidationException`, `ServerException`, `RateLimitException`) inherit the new shape and `RateLimitException::__construct` forwards `$body` through.
+- `ApiException::fromResponse()` fallback message changed from `"Unknown error"` to `"<error> (HTTP <status>)"` when the response body has no `message` field — the video service often returns `error`+`jobId` without one. `$e->getMessage()` is now informative on its own, no need to also inspect `$e->status` / `$e->error`.
+- `VideoService::__construct()` no longer validates `$videoServiceUrl` at construction time (validation was tied to the now-removed DID derivation). A malformed URL surfaces at first call as a curl error.
+- Job-state constants `JOB_STATE_COMPLETED` and `JOB_STATE_FAILED` promoted from `private const` on `Client` to `public const` on `VideoService` — single source of truth for the lexicon-defined values, accessible to callers who want to compare `$jobStatus->state` themselves. Open-set string typing is preserved (the lexicon explicitly leaves room for new states).
+
+### Removed
+
+- `curl_close($ch)` call in the curl transport. Deprecated in PHP 8.5 and a no-op since 8.0 — `CurlHandle` is auto-released when the variable goes out of scope.
+
 ## [0.2.1] - 2026-05-01
 
 ### Fixed

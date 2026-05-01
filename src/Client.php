@@ -666,13 +666,13 @@ final class Client
 				);
 			}
 			$status = $this->video->getJobStatus($jobId)->jobStatus;
-			if ($status->state === self::JOB_STATE_COMPLETED) {
+			if ($status->state === VideoService::JOB_STATE_COMPLETED) {
 				if ($status->blob === null) {
 					throw new Exception\BlueskyException('Video job '.$jobId.' completed but blob is missing');
 				}
 				return BlobRef::fromArray(Cast::toArray($status->blob, 'blob'));
 			}
-			if ($status->state === self::JOB_STATE_FAILED) {
+			if ($status->state === VideoService::JOB_STATE_FAILED) {
 				throw new Exception\BlueskyException(
 					'Video job '.$jobId.' failed: '.($status->error ?? $status->message ?? 'unknown error'),
 				);
@@ -682,10 +682,6 @@ final class Client
 			$sleep = min($sleep * 2, 10);
 		}
 	}
-
-	/** Lexicon-defined job states; see app.bsky.video.defs#jobStatus.knownValues. */
-	private const JOB_STATE_COMPLETED = 'JOB_STATE_COMPLETED';
-	private const JOB_STATE_FAILED = 'JOB_STATE_FAILED';
 
 	// =========================================================================
 	// Internal helpers

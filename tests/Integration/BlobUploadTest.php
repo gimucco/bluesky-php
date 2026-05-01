@@ -246,11 +246,14 @@ final class BlobUploadTest extends TestCase
 
 		self::assertSame('abc123', $result->jobStatus->jobId);
 
-		// Verify getServiceAuth was called on PDS
+		// Verify getServiceAuth was called on PDS:
+		// - aud is the user's PDS DID (`did:web:<pdsHost>`), not the video service
+		// - lxm is `com.atproto.repo.uploadBlob`, not `app.bsky.video.uploadVideo`
+		//   (the video service authorizes uploads as generic blob uploads).
 		$authReq = $session->requests[0];
 		self::assertStringContainsString('com.atproto.server.getServiceAuth', $authReq['url']);
-		self::assertStringContainsString('did%3Aweb%3Avideo.bsky.app', $authReq['url']);
-		self::assertStringContainsString('app.bsky.video.uploadVideo', $authReq['url']);
+		self::assertStringContainsString('aud=did%3Aweb%3Apds.example.com', $authReq['url']);
+		self::assertStringContainsString('lxm=com.atproto.repo.uploadBlob', $authReq['url']);
 
 		// Verify video upload was sent to video.bsky.app with Bearer token
 		self::assertCount(1, $transportRequests);

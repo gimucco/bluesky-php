@@ -96,6 +96,27 @@ final class ExceptionMappingTest extends TestCase
 
 		self::assertInstanceOf(ServerException::class, $e);
 		self::assertSame('Unknown', $e->error);
-		self::assertSame('Unknown error', $e->getMessage());
+		// When the body has no `message`, fall back to "<error> (HTTP <status>)"
+		// so $e->getMessage() is informative on its own — the video service
+		// often returns error+jobId without a message field.
+		self::assertSame('Unknown (HTTP 500)', $e->getMessage());
+		self::assertSame([], $e->body);
+	}
+
+	#[Test]
+	public function bodyIsExposedForApplicationLevelSignals(): void
+	{
+		// The video service returns 409 with a usable jobId for content-hash
+		// dedupe — callers reach into ->body to recover application state.
+		$e = ApiException::fromResponse(409, [
+			'did' => 'did:plc:testuser',
+			'error' => 'already_exists',
+			'jobId' => 'abc123',
+			'state' => 'JOB_STATE_COMPLETED',
+		]);
+
+		self::assertSame('already_exists', $e->error);
+		self::assertSame('abc123', $e->body['jobId']);
+		self::assertSame('JOB_STATE_COMPLETED', $e->body['state']);
 	}
 }

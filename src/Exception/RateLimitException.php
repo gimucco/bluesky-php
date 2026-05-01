@@ -11,9 +11,12 @@ final class RateLimitException extends ApiException
 {
 	public readonly ?DateTimeImmutable $retryAfter;
 
-	private function __construct(int $status, string $error, string $message, ?DateTimeImmutable $retryAfter)
+	/**
+	 * @param array<string, mixed> $body
+	 */
+	private function __construct(int $status, string $error, string $message, array $body, ?DateTimeImmutable $retryAfter)
 	{
-		parent::__construct($status, $error, $message);
+		parent::__construct($status, $error, $message, $body);
 		$this->retryAfter = $retryAfter;
 	}
 
@@ -34,6 +37,6 @@ final class RateLimitException extends ApiException
 			$parsed = (new DateTimeImmutable())->modify('+'.$retryAfter.' seconds');
 		}
 
-		return new self($status, $error, $message, $parsed);
+		return new self($status, $error, $message, $body, $parsed);
 	}
 }
