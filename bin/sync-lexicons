@@ -1,0 +1,211 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+$rootDir = dirname(__DIR__);
+$lexiconsDir = $rootDir.'/lexicons';
+$skipFile = $rootDir.'/lexicons-skip.php';
+$dryRun = in_array('--dry-run', $argv, true);
+
+require_once __DIR__.'/lib/filter.php';
+
+$skipPatterns = [];
+if (file_exists($skipFile)) {
+	$skipPatterns = require $skipFile;
+}
+
+$branch = 'main';
+$repo = 'bluesky-social/atproto';
+
+echo "Fetching latest lexicon SHA from {$repo}@{$branch}...\n";
+
+$commitUrl = 'https://api.github.com/repos/'.$repo.'/commits/'.$branch;
+$commitJson = @file_get_contents($commitUrl, false, stream_context_create([
+	'http' => ['header' => 'User-Agent: gimucco/bluesky-php'],
+]));
+if ($commitJson === false) {
+	fwrite(STDERR, "Error: Could not fetch commit info from GitHub API.\n");
+	exit(1);
+}
+$commitData = json_decode($commitJson, true);
+if (!is_array($commitData) || !isset($commitData['sha']) || !is_string($commitData['sha'])) {
+	fwrite(STDERR, "Error: Unexpected commit response format.\n");
+	exit(1);
+}
+$commitSha = $commitData['sha'];
+// Pin the archive download to the SHA we just resolved, not the moving `main`
+// pointer. This avoids a race where main advances between the API call and
+// the archive download (which would record SHA X but ship files from X+1).
+$archiveUrl = 'https://github.com/'.$repo.'/archive/'.$commitSha.'.zip';
+echo "Upstream commit: {$commitSha}\n";
+
+/**
+ * Check whether any lexicon JSON files are present on disk.
+ * SOURCE.txt alone isn't enough — the dir may be empty after a fresh clone
+ * since lexicons are gitignored.
+ */
+$hasLexiconsOnDisk = false;
+if (is_dir($lexiconsDir)) {
+	$it = new RecursiveIteratorIterator(
+		new RecursiveDirectoryIterator($lexiconsDir, RecursiveDirectoryIterator::SKIP_DOTS),
+	);
+	foreach ($it as $entry) {
+		if ($entry->isFile() && $entry->getExtension() === 'json') {
+			$hasLexiconsOnDisk = true;
+			break;
+		}
+	}
+}
+
+$sourceFile = $lexiconsDir.'/SOURCE.txt';
+if (file_exists($sourceFile)) {
+	$currentSha = trim((string) file_get_contents($sourceFile));
+	if ($currentSha === $commitSha && $hasLexiconsOnDisk) {
+		echo "Already up to date.\n";
+		exit(0);
+	}
+	if ($currentSha === $commitSha) {
+		echo "SOURCE.txt is current ({$commitSha}) but lexicon files are missing — re-downloading.\n";
+	} else {
+		echo "Current: {$currentSha}\n";
+		echo "Upstream: {$commitSha}\n";
+	}
+}
+
+if ($dryRun) {
+	echo "[dry-run] Lexicons have changed upstream. Run without --dry-run to update.\n";
+	exit(1);
+}
+
+// Use tempnam directly without rename — the file it creates has mode 0600,
+// renaming to a different name would break that and leak the original.
+$tmpFile = tempnam(sys_get_temp_dir(), 'lexicons_');
+if ($tmpFile === false) {
+	fwrite(STDERR, "Error: Could not create temp file.\n");
+	exit(1);
+}
+echo "Downloading archive (pinned to {$commitSha})...\n";
+$archiveData = @file_get_contents($archiveUrl, false, stream_context_create([
+	'http' => ['header' => 'User-Agent: gimucco/bluesky-php'],
+]));
+if ($archiveData === false) {
+	@unlink($tmpFile);
+	fwrite(STDERR, "Error: Could not download archive.\n");
+	exit(1);
+}
+file_put_contents($tmpFile, $archiveData);
+
+$tmpDir = sys_get_temp_dir().'/lexicons_extract_'.getmypid();
+if (is_dir($tmpDir)) {
+	exec('rm -rf '.escapeshellarg($tmpDir));
+}
+mkdir($tmpDir, 0755, true);
+
+$zip = new ZipArchive();
+$res = $zip->open($tmpFile);
+if ($res !== true) {
+	@unlink($tmpFile);
+	fwrite(STDERR, "Error: Could not open zip archive.\n");
+	exit(1);
+}
+
+// Manual extraction with zip-slip protection — refuse any entry whose
+// canonical path escapes $tmpDir. PHP's ZipArchive::extractTo() does not
+// validate this on its own.
+$tmpDirReal = realpath($tmpDir);
+if ($tmpDirReal === false) {
+	$zip->close();
+	@unlink($tmpFile);
+	fwrite(STDERR, "Error: Could not resolve temp dir.\n");
+	exit(1);
+}
+for ($i = 0; $i < $zip->numFiles; $i++) {
+	$name = $zip->getNameIndex($i);
+	if ($name === false) {
+		continue;
+	}
+	$targetPath = $tmpDirReal.'/'.$name;
+	$normalizedTarget = (string) preg_replace('#/+#', '/', $targetPath);
+	// Refuse absolute paths or paths containing parent traversal that would
+	// escape $tmpDirReal.
+	if (
+		str_starts_with($name, '/')
+		|| str_contains($name, '..')
+		|| !str_starts_with($normalizedTarget, $tmpDirReal.'/')
+	) {
+		$zip->close();
+		@unlink($tmpFile);
+		exec('rm -rf '.escapeshellarg($tmpDir));
+		fwrite(STDERR, "Error: Refusing to extract suspicious zip entry: {$name}\n");
+		exit(1);
+	}
+}
+$zip->extractTo($tmpDir);
+$zip->close();
+@unlink($tmpFile);
+
+$extractedLexicons = $tmpDir.'/atproto-'.$commitSha.'/lexicons';
+if (!is_dir($extractedLexicons)) {
+	exec('rm -rf '.escapeshellarg($tmpDir));
+	fwrite(STDERR, "Error: Could not find lexicons directory in archive (expected {$extractedLexicons}).\n");
+	exit(1);
+}
+
+// Clear existing lexicons (except SOURCE.txt and MANIFEST.txt)
+$existingFiles = new RecursiveIteratorIterator(
+	new RecursiveDirectoryIterator($lexiconsDir, RecursiveDirectoryIterator::SKIP_DOTS),
+	RecursiveIteratorIterator::CHILD_FIRST,
+);
+foreach ($existingFiles as $file) {
+	$basename = $file->getBasename();
+	if ($basename === 'SOURCE.txt' || $basename === 'MANIFEST.txt') {
+		continue;
+	}
+	if ($file->isDir()) {
+		@rmdir($file->getPathname());
+	} else {
+		unlink($file->getPathname());
+	}
+}
+
+// Copy new lexicons
+$sourceFiles = new RecursiveIteratorIterator(
+	new RecursiveDirectoryIterator($extractedLexicons, RecursiveDirectoryIterator::SKIP_DOTS),
+);
+$count = 0;
+$skipped = 0;
+foreach ($sourceFiles as $file) {
+	if (!$file->isFile() || $file->getExtension() !== 'json') {
+		continue;
+	}
+
+	// Read NSID from the lexicon to apply the same filter the generator uses.
+	$content = file_get_contents($file->getPathname());
+	if ($content === false) {
+		continue;
+	}
+	$data = json_decode($content, true);
+	$nsid = is_array($data) && isset($data['id']) && is_string($data['id']) ? $data['id'] : '';
+	if ($nsid === '' || !isLexiconIncluded($nsid, $skipPatterns)) {
+		$skipped++;
+		continue;
+	}
+
+	$relativePath = substr($file->getPathname(), strlen($extractedLexicons) + 1);
+	$targetPath = $lexiconsDir.'/'.$relativePath;
+	$targetDir = dirname($targetPath);
+	if (!is_dir($targetDir)) {
+		mkdir($targetDir, 0755, true);
+	}
+	copy($file->getPathname(), $targetPath);
+	$count++;
+}
+
+file_put_contents($sourceFile, $commitSha."\n");
+
+exec('rm -rf '.escapeshellarg($tmpDir));
+
+echo "Synced {$count} in-scope lexicon files (skipped {$skipped} out-of-scope).\n";
+echo "Commit SHA recorded in lexicons/SOURCE.txt\n";
+echo "\nNext step: run bin/generate-lexicons to regenerate PHP code.\n";

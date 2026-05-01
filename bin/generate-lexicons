@@ -1,0 +1,1300 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+$rootDir = dirname(__DIR__);
+$lexiconsDir = $rootDir.'/lexicons';
+$outputDir = $rootDir.'/src/Generated';
+$skipFile = $rootDir.'/lexicons-skip.php';
+$check = in_array('--check', $argv, true);
+
+foreach ($argv as $i => $arg) {
+	if ($arg === '--output-dir' && isset($argv[$i + 1])) {
+		$outputDir = $argv[$i + 1];
+	}
+	if ($arg === '--lexicons-dir' && isset($argv[$i + 1])) {
+		$lexiconsDir = $argv[$i + 1];
+	}
+}
+
+// Load shared filter helpers (isSkipped, isInScope)
+require_once __DIR__.'/lib/filter.php';
+
+// Load skip list
+$skipPatterns = [];
+if (file_exists($skipFile)) {
+	$skipPatterns = require $skipFile;
+}
+
+// Load SOURCE.txt for commit SHA
+$commitSha = 'unknown';
+$sourceFile = $lexiconsDir.'/SOURCE.txt';
+if (file_exists($sourceFile)) {
+	$commitSha = trim((string) file_get_contents($sourceFile));
+}
+
+/**
+ * Convert an NSID to a PHP namespace path.
+ * e.g. "app.bsky.actor" => "App\Bsky\Actor"
+ */
+function nsidToNamespace(string $nsid): string
+{
+	$parts = explode('.', $nsid);
+	return implode('\\', array_map('ucfirst', $parts));
+}
+
+/**
+ * Convert an NSID to a directory path.
+ * e.g. "app.bsky.actor" => "App/Bsky/Actor"
+ */
+function nsidToPath(string $nsid): string
+{
+	$parts = explode('.', $nsid);
+	return implode('/', array_map('ucfirst', $parts));
+}
+
+/**
+ * Convert a def name to a PHP class name.
+ * e.g. "profileViewDetailed" => "ProfileViewDetailed"
+ */
+function defToClassName(string $def): string
+{
+	return ucfirst($def);
+}
+
+/**
+ * Resolve a ref string to [nsid, defName].
+ */
+function resolveRef(string $ref, string $currentNsid): array
+{
+	if (str_starts_with($ref, '#')) {
+		return [$currentNsid, substr($ref, 1)];
+	}
+	if (str_contains($ref, '#')) {
+		[$nsid, $defName] = explode('#', $ref, 2);
+		return [$nsid, $defName];
+	}
+	return [$ref, 'main'];
+}
+
+/**
+ * Get the PHP type for a lexicon property.
+ */
+function phpTypeForProperty(array $prop, string $currentNsid): string
+{
+	$type = $prop['type'] ?? 'unknown';
+
+	return match ($type) {
+		'string' => 'string',
+		'integer' => 'int',
+		'boolean' => 'bool',
+		'blob' => 'mixed',
+		'bytes' => 'string',
+		'cid-link' => 'string',
+		'unknown' => 'mixed',
+		'array' => 'array',
+		'ref' => isKnownObjectRef($prop['ref'], $currentNsid) ? refToPhpType($prop['ref'], $currentNsid) : 'mixed',
+		'union' => 'mixed',
+		default => 'mixed',
+	};
+}
+
+/**
+ * Get the PHP type string for a ref.
+ */
+function refToPhpType(string $ref, string $currentNsid): string
+{
+	[$nsid, $defName] = resolveRef($ref, $currentNsid);
+	$ns = nsidToNamespace($nsid);
+	$cls = defToClassName($defName);
+	return '\\Gimucco\\Bluesky\\Generated\\Types\\'.$ns.'\\'.$cls;
+}
+
+/**
+ * Get the PHPDoc type for a lexicon property.
+ */
+function phpDocTypeForProperty(array $prop, string $currentNsid): string
+{
+	$type = $prop['type'] ?? 'unknown';
+
+	return match ($type) {
+		'string' => 'string',
+		'integer' => 'int',
+		'boolean' => 'bool',
+		'blob' => 'mixed',
+		'bytes' => 'string',
+		'cid-link' => 'string',
+		'unknown' => 'mixed',
+		'array' => phpDocArrayType($prop, $currentNsid),
+		'ref' => isKnownObjectRef($prop['ref'], $currentNsid) ? refToPhpType($prop['ref'], $currentNsid) : 'mixed',
+		'union' => 'mixed',
+		default => 'mixed',
+	};
+}
+
+/**
+ * Get array PHPDoc type.
+ */
+function phpDocArrayType(array $prop, string $currentNsid): string
+{
+	if (!isset($prop['items'])) {
+		return 'list<mixed>';
+	}
+	$itemType = $prop['items']['type'] ?? 'unknown';
+	if ($itemType === 'string') {
+		return 'list<string>';
+	}
+	if ($itemType === 'integer') {
+		return 'list<int>';
+	}
+	if ($itemType === 'ref' && isKnownObjectRef($prop['items']['ref'], $currentNsid)) {
+		$refType = refToPhpType($prop['items']['ref'], $currentNsid);
+		return 'list<'.$refType.'>';
+	}
+	return 'list<mixed>';
+}
+
+/**
+ * Get the PHPDoc shape type for a single property as it appears in fromArray/toArray data.
+ * For refs and arrays-of-refs, falls back to array<string, mixed> / list<array<string, mixed>>
+ * since the wire format is the array form.
+ */
+function phpDocShapeType(array $prop, string $currentNsid): string
+{
+	$type = $prop['type'] ?? 'unknown';
+
+	return match ($type) {
+		'string', 'bytes', 'cid-link' => 'string',
+		'integer' => 'int',
+		'boolean' => 'bool',
+		'array' => phpDocShapeArrayType($prop, $currentNsid),
+		'ref' => isKnownObjectRef($prop['ref'] ?? '', $currentNsid) ? 'array<string, mixed>' : 'mixed',
+		default => 'mixed',
+	};
+}
+
+function phpDocShapeArrayType(array $prop, string $currentNsid): string
+{
+	if (!isset($prop['items'])) {
+		return 'list<mixed>';
+	}
+	$itemType = $prop['items']['type'] ?? 'unknown';
+	return match ($itemType) {
+		'string' => 'list<string>',
+		'integer' => 'list<int>',
+		'ref' => isKnownObjectRef($prop['items']['ref'] ?? '', $currentNsid) ? 'list<array<string, mixed>>' : 'list<mixed>',
+		default => 'list<mixed>',
+	};
+}
+
+// ---------------------------------------------------
+// Parse all lexicons
+// ---------------------------------------------------
+
+$lexicons = [];
+$jsonFiles = new RecursiveIteratorIterator(
+	new RecursiveDirectoryIterator($lexiconsDir, RecursiveDirectoryIterator::SKIP_DOTS),
+);
+foreach ($jsonFiles as $file) {
+	if ($file->getExtension() !== 'json') {
+		continue;
+	}
+	$content = file_get_contents($file->getPathname());
+	if ($content === false) {
+		continue;
+	}
+	$data = json_decode($content, true);
+	if (!is_array($data) || !isset($data['id'])) {
+		continue;
+	}
+	$nsid = (string) $data['id'];
+	if (isSkipped($nsid, $skipPatterns)) {
+		continue;
+	}
+	if (!isInScope($nsid)) {
+		continue;
+	}
+	$lexicons[$nsid] = $data;
+}
+
+ksort($lexicons);
+
+if (count($lexicons) === 0) {
+	fwrite(STDERR, "Error: No in-scope lexicon files found in {$lexiconsDir}\n");
+	fwrite(STDERR, "Run: composer sync-lexicons\n");
+	exit(1);
+}
+
+echo "Found ".count($lexicons)." in-scope lexicons.\n";
+
+// ---------------------------------------------------
+// Generate Type classes
+// ---------------------------------------------------
+
+$generatedFiles = [];
+$manifest = [];
+
+/**
+ * Generate a value object class for an object def.
+ */
+function generateTypeClass(
+	string $nsid,
+	string $defName,
+	array $def,
+	string $commitSha,
+	?string $refNsid = null,
+): string {
+	$ns = nsidToNamespace($nsid);
+	$className = defToClassName($defName);
+	$fullNs = 'Gimucco\\Bluesky\\Generated\\Types\\'.$ns;
+	$required = $def['required'] ?? [];
+	$properties = $def['properties'] ?? [];
+	$description = $def['description'] ?? '';
+	// Use $refNsid for resolving local refs (e.g. #like) when different from the output namespace
+	$resolveNsid = $refNsid ?? $nsid;
+
+	$code = "<?php\n\n";
+	$code .= "declare(strict_types=1);\n\n";
+	$code .= "// Auto-generated by bin/generate-lexicons. Do NOT edit by hand.\n";
+	$code .= "// Source lexicon: {$nsid}#{$defName} (commit {$commitSha})\n\n";
+	$code .= "namespace {$fullNs};\n\n";
+
+	// Class docblock
+	if ($description !== '') {
+		$code .= "/**\n";
+		$code .= " * ".wordwrap($description, 100, "\n * ")."\n";
+		$code .= " */\n";
+	}
+
+	$code .= "final class {$className}\n{\n";
+
+	// Constructor with promoted properties — required params first to avoid PHP deprecation
+	if (!empty($properties)) {
+		$code .= "\tpublic function __construct(\n";
+		$requiredLines = [];
+		$optionalLines = [];
+		foreach ($properties as $propName => $propDef) {
+			$phpType = phpTypeForProperty($propDef, $resolveNsid);
+			$isRequired = in_array($propName, $required, true);
+			$docType = phpDocTypeForProperty($propDef, $resolveNsid);
+
+			$propComment = '';
+			if ($docType !== $phpType && $phpType === 'array') {
+				$propComment = "\t\t/** @var {$docType} */\n";
+			}
+
+			if ($isRequired) {
+				$requiredLines[] = $propComment."\t\tpublic readonly {$phpType} \${$propName},";
+			} else {
+				$nullableType = $phpType === 'mixed' ? 'mixed' : '?'.$phpType;
+				$optionalLines[] = $propComment."\t\tpublic readonly {$nullableType} \${$propName} = null,";
+			}
+		}
+		$allLines = array_merge($requiredLines, $optionalLines);
+		$code .= implode("\n", $allLines)."\n";
+		$code .= "\t) {}\n\n";
+	} else {
+		$code .= "\tpublic function __construct() {}\n\n";
+	}
+
+	// fromArray factory
+	$code .= generateFromArray($resolveNsid, $className, $properties, $required);
+
+	// toArray method
+	$code .= "\n";
+	$code .= generateToArray($properties, $required, $resolveNsid);
+
+	$code .= "}\n";
+
+	return $code;
+}
+
+/**
+ * Get default value for a nullable type.
+ */
+function phpDefaultValue(string $phpType): string
+{
+	if ($phpType === 'mixed') {
+		return 'null';
+	}
+	return 'null';
+}
+
+/**
+ * Make a type nullable for non-required properties.
+ */
+function phpTypeForProperty2(array $prop, string $currentNsid, bool $isRequired): string
+{
+	$type = phpTypeForProperty($prop, $currentNsid);
+	if (!$isRequired && $type !== 'mixed') {
+		return '?'.$type;
+	}
+	return $type;
+}
+
+/**
+ * Build an array{} shape PHPDoc string for the given properties.
+ */
+function buildArrayShape(array $properties, array $required, string $nsid): string
+{
+	if (empty($properties)) {
+		return 'array<string, mixed>';
+	}
+	$parts = [];
+	foreach ($properties as $propName => $propDef) {
+		$shape = phpDocShapeType($propDef, $nsid);
+		$opt = in_array($propName, $required, true) ? '' : '?';
+		$parts[] = $propName.$opt.': '.$shape;
+	}
+	return 'array{'.implode(', ', $parts).'}';
+}
+
+/**
+ * Generate fromArray static factory method.
+ */
+function generateFromArray(string $nsid, string $className, array $properties, array $required): string
+{
+	$code = "\t/**\n";
+	$code .= "\t * @param array<string, mixed> \$data\n";
+	$code .= "\t */\n";
+	$code .= "\tpublic static function fromArray(array \$data): self\n\t{\n";
+	$code .= "\t\treturn new self(\n";
+
+	$requiredArgs = [];
+	$optionalArgs = [];
+	foreach ($properties as $propName => $propDef) {
+		$isRequired = in_array($propName, $required, true);
+		$phpType = phpTypeForProperty($propDef, $nsid);
+		$propType = $propDef['type'] ?? 'unknown';
+
+		$arg = generateFromArrayArg($propName, $propDef, $propType, $phpType, $isRequired, $nsid);
+		if ($isRequired) {
+			$requiredArgs[] = $arg;
+		} else {
+			$optionalArgs[] = $arg;
+		}
+	}
+
+	$allArgs = array_merge($requiredArgs, $optionalArgs);
+	$code .= implode("\n", $allArgs)."\n";
+	$code .= "\t\t);\n";
+	$code .= "\t}\n";
+
+	return $code;
+}
+
+function generateFromArrayArg(string $propName, array $propDef, string $propType, string $phpType, bool $isRequired, string $nsid): string
+{
+	$cast = '\\Gimucco\\Bluesky\\Internal\\Cast';
+	$fld = "'{$propName}'";
+
+	if ($propType === 'ref' && isKnownObjectRef($propDef['ref'], $nsid)) {
+		$refClass = refToPhpType($propDef['ref'], $nsid);
+		if ($isRequired) {
+			return "\t\t\t{$propName}: {$refClass}::fromArray({$cast}::toArray(\$data['{$propName}'], {$fld})),";
+		}
+		return "\t\t\t{$propName}: isset(\$data['{$propName}']) ? {$refClass}::fromArray({$cast}::toArray(\$data['{$propName}'], {$fld})) : null,";
+	}
+	if ($propType === 'array' && isset($propDef['items']['type']) && $propDef['items']['type'] === 'ref' && isKnownObjectRef($propDef['items']['ref'], $nsid)) {
+		$refClass = refToPhpType($propDef['items']['ref'], $nsid);
+		return "\t\t\t{$propName}: isset(\$data['{$propName}']) ? array_map(static fn(mixed \$item): {$refClass} => {$refClass}::fromArray({$cast}::toArray(\$item, {$fld}.'[]')), {$cast}::toList(\$data['{$propName}'], {$fld})) : ".($isRequired ? '[]' : 'null').",";
+	}
+	if ($propType === 'array') {
+		// Map scalar-typed lists through toList so the result is list<mixed>
+		$itemType = $propDef['items']['type'] ?? 'unknown';
+		if ($itemType === 'string' || $itemType === 'integer') {
+			$caster = $itemType === 'string' ? 'toString' : 'toInt';
+			if ($isRequired) {
+				return "\t\t\t{$propName}: isset(\$data['{$propName}']) ? array_map(static fn(mixed \$v): ".($itemType === 'string' ? 'string' : 'int')." => {$cast}::{$caster}(\$v, {$fld}.'[]'), {$cast}::toList(\$data['{$propName}'], {$fld})) : [],";
+			}
+			return "\t\t\t{$propName}: isset(\$data['{$propName}']) ? array_map(static fn(mixed \$v): ".($itemType === 'string' ? 'string' : 'int')." => {$cast}::{$caster}(\$v, {$fld}.'[]'), {$cast}::toList(\$data['{$propName}'], {$fld})) : null,";
+		}
+		if ($isRequired) {
+			return "\t\t\t{$propName}: isset(\$data['{$propName}']) ? {$cast}::toList(\$data['{$propName}'], {$fld}) : [],";
+		}
+		return "\t\t\t{$propName}: isset(\$data['{$propName}']) ? {$cast}::toList(\$data['{$propName}'], {$fld}) : null,";
+	}
+	if ($phpType === 'string') {
+		if ($isRequired) {
+			return "\t\t\t{$propName}: {$cast}::toString(\$data['{$propName}'], {$fld}),";
+		}
+		return "\t\t\t{$propName}: isset(\$data['{$propName}']) ? {$cast}::toString(\$data['{$propName}'], {$fld}) : null,";
+	}
+	if ($phpType === 'int') {
+		if ($isRequired) {
+			return "\t\t\t{$propName}: {$cast}::toInt(\$data['{$propName}'], {$fld}),";
+		}
+		return "\t\t\t{$propName}: isset(\$data['{$propName}']) ? {$cast}::toInt(\$data['{$propName}'], {$fld}) : null,";
+	}
+	if ($phpType === 'bool') {
+		if ($isRequired) {
+			return "\t\t\t{$propName}: {$cast}::toBool(\$data['{$propName}'], {$fld}),";
+		}
+		return "\t\t\t{$propName}: isset(\$data['{$propName}']) ? {$cast}::toBool(\$data['{$propName}'], {$fld}) : null,";
+	}
+	return "\t\t\t{$propName}: \$data['{$propName}'] ?? null,";
+}
+
+/**
+ * Generate toArray method.
+ */
+function generateToArray(array $properties, array $required, string $nsid): string
+{
+	$shape = buildArrayShape($properties, $required, $nsid);
+	$code = "\t/**\n";
+	$code .= "\t * @return {$shape}\n";
+	$code .= "\t */\n";
+	$code .= "\tpublic function toArray(): array\n\t{\n";
+	$code .= "\t\t\$data = [];\n";
+
+	foreach ($properties as $propName => $propDef) {
+		$isRequired = in_array($propName, $required, true);
+		$propType = $propDef['type'] ?? 'unknown';
+		$isObjRef = $propType === 'ref' && isset($propDef['ref']) && isKnownObjectRef($propDef['ref'], $nsid);
+		$isObjArrayRef = $propType === 'array' && isset($propDef['items']['type']) && $propDef['items']['type'] === 'ref' && isset($propDef['items']['ref']) && isKnownObjectRef($propDef['items']['ref'], $nsid);
+
+		if ($isRequired) {
+			if ($isObjRef) {
+				$code .= "\t\t\$data['{$propName}'] = \$this->{$propName}->toArray();\n";
+			} elseif ($isObjArrayRef) {
+				$code .= "\t\t\$data['{$propName}'] = array_map(static fn(object \$item): array => \$item->toArray(), \$this->{$propName});\n";
+			} else {
+				$code .= "\t\t\$data['{$propName}'] = \$this->{$propName};\n";
+			}
+		} else {
+			if ($isObjRef) {
+				$code .= "\t\tif (\$this->{$propName} !== null) {\n";
+				$code .= "\t\t\t\$data['{$propName}'] = \$this->{$propName}->toArray();\n";
+				$code .= "\t\t}\n";
+			} elseif ($isObjArrayRef) {
+				$code .= "\t\tif (\$this->{$propName} !== null) {\n";
+				$code .= "\t\t\t\$data['{$propName}'] = array_map(static fn(object \$item): array => \$item->toArray(), \$this->{$propName});\n";
+				$code .= "\t\t}\n";
+			} else {
+				$code .= "\t\tif (\$this->{$propName} !== null) {\n";
+				$code .= "\t\t\t\$data['{$propName}'] = \$this->{$propName};\n";
+				$code .= "\t\t}\n";
+			}
+		}
+	}
+
+	$code .= "\t\treturn \$data;\n";
+	$code .= "\t}\n";
+
+	return $code;
+}
+
+// ---------------------------------------------------
+// Generate Method classes
+// ---------------------------------------------------
+
+/**
+ * Group lexicons by their method-class namespace.
+ * E.g., "app.bsky.actor.getProfile" => method class "App\Bsky\Actor"
+ * Defs-only files (e.g., "app.bsky.actor.defs") are type-only, no methods.
+ */
+function getMethodClassNsid(string $nsid): string
+{
+	$parts = explode('.', $nsid);
+	array_pop($parts); // remove the method name
+	return implode('.', $parts);
+}
+
+/**
+ * Get the method name from an NSID.
+ * e.g. "app.bsky.actor.getProfile" => "getProfile"
+ */
+function getMethodName(string $nsid): string
+{
+	$parts = explode('.', $nsid);
+	return end($parts);
+}
+
+/**
+ * Generate a single method for a query or procedure lexicon.
+ */
+function generateMethod(string $nsid, array $def, string $commitSha): string
+{
+	$type = $def['type'] ?? '';
+	$description = $def['description'] ?? '';
+	$methodName = getMethodName($nsid);
+
+	if ($type === 'query') {
+		return generateQueryMethod($nsid, $methodName, $def, $description);
+	}
+	if ($type === 'procedure') {
+		return generateProcedureMethod($nsid, $methodName, $def, $description);
+	}
+	return '';
+}
+
+/**
+ * Generate a query (GET) method.
+ */
+function generateQueryMethod(string $nsid, string $methodName, array $def, string $description): string
+{
+	$params = $def['parameters']['properties'] ?? [];
+	$required = $def['parameters']['required'] ?? [];
+	$output = $def['output'] ?? [];
+	$errors = $def['errors'] ?? [];
+
+	// Separate scalar and array params for code generation
+	$phpParams = [];
+	$phpDocParams = [];
+	$scalarParams = []; // [name => paramDef] for required scalars
+	$optionalScalarParams = []; // [name => paramDef] for optional scalars
+	$arrayParams = []; // [name => [required => bool]]
+
+	// Required params first
+	foreach ($params as $paramName => $paramDef) {
+		if (!in_array($paramName, $required, true)) {
+			continue;
+		}
+		$phpType = phpTypeForProperty($paramDef, $nsid);
+		$phpParams[] = "{$phpType} \${$paramName}";
+		if ($phpType === 'array') {
+			$arrayParams[$paramName] = ['required' => true];
+		} else {
+			$scalarParams[$paramName] = $paramDef;
+		}
+		$docType = phpDocTypeForProperty($paramDef, $nsid);
+		$paramDesc = $paramDef['description'] ?? '';
+		$phpDocParams[] = "\t * @param {$docType} \${$paramName}".($paramDesc !== '' ? ' '.$paramDesc : '');
+	}
+	// Optional params
+	foreach ($params as $paramName => $paramDef) {
+		if (in_array($paramName, $required, true)) {
+			continue;
+		}
+		$phpType = phpTypeForProperty($paramDef, $nsid);
+		if ($phpType === 'array') {
+			$phpParams[] = "?array \${$paramName} = null";
+			$arrayParams[$paramName] = ['required' => false];
+		} elseif ($phpType === 'mixed') {
+			$phpParams[] = "mixed \${$paramName} = null";
+			$optionalScalarParams[$paramName] = $paramDef;
+		} else {
+			$phpParams[] = "?{$phpType} \${$paramName} = null";
+			$optionalScalarParams[$paramName] = $paramDef;
+		}
+		$docType = phpDocTypeForProperty($paramDef, $nsid);
+		$paramDesc = $paramDef['description'] ?? '';
+		$phpDocParams[] = "\t * @param {$docType}|null \${$paramName}".($paramDesc !== '' ? ' '.$paramDesc : '');
+	}
+
+	// Return type
+	$returnInfo = getReturnType($nsid, $output);
+
+	// Build method
+	$code = "\n";
+	$code .= "\t/**\n";
+	if ($description !== '') {
+		$code .= "\t * ".wordwrap($description, 100, "\n\t * ")."\n";
+		$code .= "\t *\n";
+	}
+	foreach ($phpDocParams as $doc) {
+		$code .= $doc."\n";
+	}
+	$code .= "\t * @return {$returnInfo['docType']}\n";
+	$code .= "\t * @throws \\Gimucco\\Bluesky\\Exception\\ApiException\n";
+	$code .= "\t */\n";
+
+	$paramStr = implode(', ', $phpParams);
+	$code .= "\tpublic function {$methodName}({$paramStr}): {$returnInfo['phpType']}\n";
+	$code .= "\t{\n";
+
+	$hasScalar = !empty($scalarParams) || !empty($optionalScalarParams);
+	$hasArray = !empty($arrayParams);
+	$hasAnyParams = $hasScalar || $hasArray;
+
+	if (!$hasAnyParams) {
+		// No params at all — direct request
+		$code .= "\t\t\$response = \$this->session->authenticatedRequest(\n";
+		$code .= "\t\t\t'GET',\n";
+		$code .= "\t\t\t\$this->session->pdsUrl.'/xrpc/{$nsid}',\n";
+		$code .= "\t\t);\n";
+	} elseif (!$hasArray && empty($optionalScalarParams)) {
+		// Only required scalar params — build query directly
+		$code .= "\t\t\$query = [\n";
+		foreach ($scalarParams as $name => $pDef) {
+			$pType = ($pDef['type'] ?? 'string');
+			if ($pType === 'boolean') {
+				$code .= "\t\t\t'{$name}' => \${$name} ? 'true' : 'false',\n";
+			} else {
+				$code .= "\t\t\t'{$name}' => \${$name},\n";
+			}
+		}
+		$code .= "\t\t];\n";
+		$code .= "\t\t\$response = \$this->session->authenticatedRequest(\n";
+		$code .= "\t\t\t'GET',\n";
+		$code .= "\t\t\t\$this->session->pdsUrl.'/xrpc/{$nsid}?'.http_build_query(\$query),\n";
+		$code .= "\t\t);\n";
+	} elseif ($hasArray && !$hasScalar) {
+		// Only array params — build query string from arrays directly
+		$code .= "\t\t\$queryString = '';\n";
+		foreach ($arrayParams as $name => $info) {
+			if ($info['required']) {
+				$code .= "\t\tforeach (\${$name} as \$v) {\n";
+				$code .= "\t\t\t\$queryString .= (\$queryString !== '' ? '&' : '').urlencode('{$name}').'='.urlencode(\$v);\n";
+				$code .= "\t\t}\n";
+			} else {
+				$code .= "\t\tif (\${$name} !== null) {\n";
+				$code .= "\t\t\tforeach (\${$name} as \$v) {\n";
+				$code .= "\t\t\t\t\$queryString .= (\$queryString !== '' ? '&' : '').urlencode('{$name}').'='.urlencode(\$v);\n";
+				$code .= "\t\t\t}\n";
+				$code .= "\t\t}\n";
+			}
+		}
+		$code .= "\t\t\$response = \$this->session->authenticatedRequest(\n";
+		$code .= "\t\t\t'GET',\n";
+		$code .= "\t\t\t\$this->session->pdsUrl.'/xrpc/{$nsid}'.(\$queryString !== '' ? '?'.\$queryString : ''),\n";
+		$code .= "\t\t);\n";
+	} else {
+		// Mixed scalar + optional or array params — build required, then add optional
+		$code .= "\t\t\$query = [\n";
+		foreach ($scalarParams as $name => $pDef) {
+			$pType = ($pDef['type'] ?? 'string');
+			if ($pType === 'boolean') {
+				$code .= "\t\t\t'{$name}' => \${$name} ? 'true' : 'false',\n";
+			} else {
+				$code .= "\t\t\t'{$name}' => \${$name},\n";
+			}
+		}
+		$code .= "\t\t];\n";
+		foreach ($optionalScalarParams as $name => $pDef) {
+			$pType = ($pDef['type'] ?? 'string');
+			if ($pType === 'boolean') {
+				$code .= "\t\tif (\${$name} !== null) {\n";
+				$code .= "\t\t\t\$query['{$name}'] = \${$name} ? 'true' : 'false';\n";
+				$code .= "\t\t}\n";
+			} else {
+				$code .= "\t\tif (\${$name} !== null) {\n";
+				$code .= "\t\t\t\$query['{$name}'] = \${$name};\n";
+				$code .= "\t\t}\n";
+			}
+		}
+
+		if ($hasArray) {
+			$code .= "\t\t\$queryString = http_build_query(\$query);\n";
+			foreach ($arrayParams as $name => $info) {
+				if ($info['required']) {
+					$code .= "\t\tforeach (\${$name} as \$v) {\n";
+					$code .= "\t\t\t\$queryString .= (\$queryString !== '' ? '&' : '').urlencode('{$name}').'='.urlencode(\$v);\n";
+					$code .= "\t\t}\n";
+				} else {
+					$code .= "\t\tif (\${$name} !== null) {\n";
+					$code .= "\t\t\tforeach (\${$name} as \$v) {\n";
+					$code .= "\t\t\t\t\$queryString .= (\$queryString !== '' ? '&' : '').urlencode('{$name}').'='.urlencode(\$v);\n";
+					$code .= "\t\t\t}\n";
+					$code .= "\t\t}\n";
+				}
+			}
+			$code .= "\t\t\$response = \$this->session->authenticatedRequest(\n";
+			$code .= "\t\t\t'GET',\n";
+			$code .= "\t\t\t\$this->session->pdsUrl.'/xrpc/{$nsid}'.(\$queryString !== '' ? '?'.\$queryString : ''),\n";
+			$code .= "\t\t);\n";
+		} else {
+			$code .= "\t\t\$queryString = http_build_query(\$query);\n";
+			$code .= "\t\t\$response = \$this->session->authenticatedRequest(\n";
+			$code .= "\t\t\t'GET',\n";
+			$code .= "\t\t\t\$this->session->pdsUrl.'/xrpc/{$nsid}'.(\$queryString !== '' ? '?'.\$queryString : ''),\n";
+			$code .= "\t\t);\n";
+		}
+	}
+
+	$code .= generateResponseHandling($returnInfo);
+	$code .= "\t}\n";
+
+	// Emit a paginate* companion if the method paginates
+	$paginatorInfo = detectPaginator($nsid, $params, $required, $def['output'] ?? []);
+	if ($paginatorInfo !== null) {
+		$code .= generatePaginatorMethod($nsid, $methodName, $params, $required, $description, $returnInfo, $paginatorInfo);
+	}
+
+	return $code;
+}
+
+/**
+ * If a query method paginates (input has cursor, output has cursor + a single array),
+ * return [itemsField, itemType (PHP class or scalar)]. Otherwise return null.
+ */
+function detectPaginator(string $nsid, array $params, array $required, array $output): ?array
+{
+	if (!isset($params['cursor'])) {
+		return null;
+	}
+	$schema = $output['schema'] ?? [];
+	if (($schema['type'] ?? '') !== 'object') {
+		return null;
+	}
+	$outProps = $schema['properties'] ?? [];
+	if (!isset($outProps['cursor'])) {
+		return null;
+	}
+
+	$arrayFields = [];
+	foreach ($outProps as $name => $def) {
+		if (($def['type'] ?? '') === 'array') {
+			$arrayFields[$name] = $def;
+		}
+	}
+	if (count($arrayFields) !== 1) {
+		return null;
+	}
+
+	$itemsField = (string) array_key_first($arrayFields);
+	$itemsDef = $arrayFields[$itemsField];
+	$itemType = $itemsDef['items']['type'] ?? 'unknown';
+
+	if ($itemType === 'ref' && isKnownObjectRef($itemsDef['items']['ref'] ?? '', $nsid)) {
+		return ['field' => $itemsField, 'phpType' => refToPhpType($itemsDef['items']['ref'], $nsid)];
+	}
+	if ($itemType === 'union') {
+		return ['field' => $itemsField, 'phpType' => 'mixed'];
+	}
+	if ($itemType === 'string') {
+		return ['field' => $itemsField, 'phpType' => 'string'];
+	}
+	return ['field' => $itemsField, 'phpType' => 'mixed'];
+}
+
+/**
+ * Generate a paginate* method that yields all items across pages.
+ */
+function generatePaginatorMethod(string $nsid, string $methodName, array $params, array $required, string $description, array $returnInfo, array $paginatorInfo): string
+{
+	// Strip leading get/list verbs since "paginate" already implies fetching
+	$base = $methodName;
+	if (str_starts_with($base, 'get') && strlen($base) > 3 && ctype_upper($base[3])) {
+		$base = substr($base, 3);
+	} elseif (str_starts_with($base, 'list') && strlen($base) > 4 && ctype_upper($base[4])) {
+		$base = substr($base, 4);
+	} else {
+		$base = ucfirst($base);
+	}
+	$paginatorName = 'paginate'.$base;
+	$itemsField = $paginatorInfo['field'];
+	$itemType = $paginatorInfo['phpType'];
+
+	// Build parameter list excluding cursor; consumers don't manage it
+	$phpParams = [];
+	$callArgs = [];
+	$phpDocParams = [];
+	// Required first
+	foreach ($params as $paramName => $paramDef) {
+		if ($paramName === 'cursor') {
+			continue;
+		}
+		if (!in_array($paramName, $required, true)) {
+			continue;
+		}
+		$phpType = phpTypeForProperty($paramDef, $nsid);
+		$phpParams[] = "{$phpType} \${$paramName}";
+		$callArgs[] = "{$paramName}: \${$paramName}";
+		$docType = phpDocTypeForProperty($paramDef, $nsid);
+		$phpDocParams[] = "\t * @param {$docType} \${$paramName}";
+	}
+	// Optional
+	foreach ($params as $paramName => $paramDef) {
+		if ($paramName === 'cursor' || in_array($paramName, $required, true)) {
+			continue;
+		}
+		$phpType = phpTypeForProperty($paramDef, $nsid);
+		if ($phpType === 'array') {
+			$phpParams[] = "?array \${$paramName} = null";
+		} elseif ($phpType === 'mixed') {
+			$phpParams[] = "mixed \${$paramName} = null";
+		} else {
+			$phpParams[] = "?{$phpType} \${$paramName} = null";
+		}
+		$callArgs[] = "{$paramName}: \${$paramName}";
+		$docType = phpDocTypeForProperty($paramDef, $nsid);
+		$phpDocParams[] = "\t * @param {$docType}|null \${$paramName}";
+	}
+	$phpParams[] = "?int \$maxItems = null";
+	$phpDocParams[] = "\t * @param int|null \$maxItems Stop after yielding this many items";
+
+	$code = "\n";
+	$code .= "\t/**\n";
+	$summary = $description !== ''
+		? 'Auto-paginating variant of '.$methodName.'(). '.wordwrap($description, 90, "\n\t * ")
+		: 'Auto-paginating variant of '.$methodName.'(). Yields each item across pages.';
+	$code .= "\t * ".$summary."\n";
+	$code .= "\t *\n";
+	foreach ($phpDocParams as $doc) {
+		$code .= $doc."\n";
+	}
+	$code .= "\t * @return Generator<int, {$itemType}>\n";
+	$code .= "\t * @throws \\Gimucco\\Bluesky\\Exception\\ApiException\n";
+	$code .= "\t */\n";
+	$paramStr = implode(', ', $phpParams);
+	$code .= "\tpublic function {$paginatorName}({$paramStr}): Generator\n";
+	$code .= "\t{\n";
+	$code .= "\t\t\$cursor = null;\n";
+	$code .= "\t\t\$count = 0;\n";
+	$code .= "\t\tdo {\n";
+	$callArgs[] = "cursor: \$cursor";
+	$code .= "\t\t\t\$page = \$this->{$methodName}(".implode(', ', $callArgs).");\n";
+	$code .= "\t\t\tforeach (\$page->{$itemsField} as \$item) {\n";
+	$code .= "\t\t\t\tyield \$item;\n";
+	$code .= "\t\t\t\t\$count++;\n";
+	$code .= "\t\t\t\tif (\$maxItems !== null && \$count >= \$maxItems) {\n";
+	$code .= "\t\t\t\t\treturn;\n";
+	$code .= "\t\t\t\t}\n";
+	$code .= "\t\t\t}\n";
+	$code .= "\t\t\t\$cursor = \$page->cursor;\n";
+	$code .= "\t\t} while (\$cursor !== null && \$cursor !== '');\n";
+	$code .= "\t}\n";
+
+	return $code;
+}
+
+/**
+ * Generate a procedure (POST) method.
+ */
+function generateProcedureMethod(string $nsid, string $methodName, array $def, string $description): string
+{
+	$input = $def['input'] ?? [];
+	$output = $def['output'] ?? [];
+	$errors = $def['errors'] ?? [];
+	$encoding = $input['encoding'] ?? '';
+
+	// Special case: raw-body upload. Any non-empty, non-JSON input encoding
+	// means the body is raw bytes (e.g. */* for uploadBlob, video/mp4 for
+	// uploadVideo) rather than a JSON-encoded object. These need
+	// authenticatedRawRequest, not authenticatedRequest.
+	if ($encoding !== '' && $encoding !== 'application/json') {
+		return generateBlobUploadMethod($nsid, $methodName, $def, $description, $encoding);
+	}
+
+	$inputSchema = $input['schema'] ?? [];
+	$inputProps = $inputSchema['properties'] ?? [];
+	$inputRequired = $inputSchema['required'] ?? [];
+
+	// Build parameter list
+	$phpParams = [];
+	$phpDocParams = [];
+	$requiredBodyProps = [];
+	$optionalBodyProps = [];
+
+	// Required params first
+	foreach ($inputProps as $paramName => $paramDef) {
+		if (!in_array($paramName, $inputRequired, true)) {
+			continue;
+		}
+		$phpType = phpTypeForProperty($paramDef, $nsid);
+		$phpParams[] = "{$phpType} \${$paramName}";
+		$requiredBodyProps[] = $paramName;
+		$docType = phpDocTypeForProperty($paramDef, $nsid);
+		$paramDesc = $paramDef['description'] ?? '';
+		$phpDocParams[] = "\t * @param {$docType} \${$paramName}".($paramDesc !== '' ? ' '.$paramDesc : '');
+	}
+	// Optional params
+	foreach ($inputProps as $paramName => $paramDef) {
+		if (in_array($paramName, $inputRequired, true)) {
+			continue;
+		}
+		$phpType = phpTypeForProperty($paramDef, $nsid);
+		if ($phpType === 'mixed') {
+			$phpParams[] = "mixed \${$paramName} = null";
+		} elseif ($phpType === 'array') {
+			$phpParams[] = "?array \${$paramName} = null";
+		} else {
+			$phpParams[] = "?{$phpType} \${$paramName} = null";
+		}
+		$optionalBodyProps[] = $paramName;
+		$docType = phpDocTypeForProperty($paramDef, $nsid);
+		$paramDesc = $paramDef['description'] ?? '';
+		$phpDocParams[] = "\t * @param {$docType}|null \${$paramName}".($paramDesc !== '' ? ' '.$paramDesc : '');
+	}
+
+	// Return type
+	$returnInfo = getReturnType($nsid, $output);
+
+	// Build method
+	$code = "\n";
+	$code .= "\t/**\n";
+	if ($description !== '') {
+		$code .= "\t * ".wordwrap($description, 100, "\n\t * ")."\n";
+		$code .= "\t *\n";
+	}
+	foreach ($phpDocParams as $doc) {
+		$code .= $doc."\n";
+	}
+	if ($returnInfo['phpType'] !== 'void') {
+		$code .= "\t * @return {$returnInfo['docType']}\n";
+	}
+	$code .= "\t * @throws \\Gimucco\\Bluesky\\Exception\\ApiException\n";
+	$code .= "\t */\n";
+
+	$paramStr = implode(', ', $phpParams);
+	$code .= "\tpublic function {$methodName}({$paramStr}): {$returnInfo['phpType']}\n";
+	$code .= "\t{\n";
+
+	// Build body
+	if (empty($optionalBodyProps)) {
+		// All required — no filtering needed
+		$code .= "\t\t\$body = [\n";
+		foreach ($requiredBodyProps as $name) {
+			$code .= "\t\t\t'{$name}' => \${$name},\n";
+		}
+		$code .= "\t\t];\n";
+	} else {
+		// Start with required, then conditionally add optional
+		$code .= "\t\t\$body = [\n";
+		foreach ($requiredBodyProps as $name) {
+			$code .= "\t\t\t'{$name}' => \${$name},\n";
+		}
+		$code .= "\t\t];\n";
+		foreach ($optionalBodyProps as $name) {
+			$code .= "\t\tif (\${$name} !== null) {\n";
+			$code .= "\t\t\t\$body['{$name}'] = \${$name};\n";
+			$code .= "\t\t}\n";
+		}
+	}
+	$code .= "\t\t\$response = \$this->session->authenticatedRequest(\n";
+	$code .= "\t\t\t'POST',\n";
+	$code .= "\t\t\t\$this->session->pdsUrl.'/xrpc/{$nsid}',\n";
+	$code .= "\t\t\t\$body,\n";
+	$code .= "\t\t);\n";
+
+	$code .= generateResponseHandling($returnInfo);
+	$code .= "\t}\n";
+
+	return $code;
+}
+
+/**
+ * Generate blob upload method.
+ */
+/**
+ * Generate a raw-body upload method.
+ *
+ * If $encoding is "*\/*", caller must supply $mimeType (no default).
+ * If $encoding is a specific type (e.g. "video/mp4"), it becomes the default
+ * for $mimeType — caller can still override (server may reject mismatches).
+ */
+function generateBlobUploadMethod(string $nsid, string $methodName, array $def, string $description, string $encoding = '*/*'): string
+{
+	$output = $def['output'] ?? [];
+	$returnInfo = getReturnType($nsid, $output);
+
+	$mimeTypeParam = $encoding === '*/*'
+		? 'string $mimeType'
+		: 'string $mimeType = '.var_export($encoding, true);
+	$mimeTypeDoc = $encoding === '*/*'
+		? '@param string $mimeType MIME type of the blob (e.g. "image/jpeg")'
+		: '@param string $mimeType MIME type — defaults to the lexicon-specified "'.$encoding.'"';
+
+	$code = "\n";
+	$code .= "\t/**\n";
+	if ($description !== '') {
+		$code .= "\t * ".wordwrap($description, 100, "\n\t * ")."\n";
+		$code .= "\t *\n";
+	}
+	$code .= "\t * @param string \$bytes Raw bytes to upload\n";
+	$code .= "\t * ".$mimeTypeDoc."\n";
+	$code .= "\t * @return {$returnInfo['docType']}\n";
+	$code .= "\t * @throws \\Gimucco\\Bluesky\\Exception\\ApiException\n";
+	$code .= "\t */\n";
+	$code .= "\tpublic function {$methodName}(string \$bytes, ".$mimeTypeParam."): {$returnInfo['phpType']}\n";
+	$code .= "\t{\n";
+	$code .= "\t\t\$response = \$this->session->authenticatedRawRequest(\n";
+	$code .= "\t\t\t'POST',\n";
+	$code .= "\t\t\t\$this->session->pdsUrl.'/xrpc/{$nsid}',\n";
+	$code .= "\t\t\t\$bytes,\n";
+	$code .= "\t\t\t\$mimeType,\n";
+	$code .= "\t\t);\n";
+	$code .= generateResponseHandling($returnInfo);
+	$code .= "\t}\n";
+
+	return $code;
+}
+
+/**
+ * Get return type info for a method.
+ */
+function getReturnType(string $nsid, array $output): array
+{
+	if (empty($output) || !isset($output['schema'])) {
+		return ['phpType' => 'void', 'docType' => 'void', 'isObject' => false, 'class' => ''];
+	}
+
+	$schema = $output['schema'];
+
+	// If it's a direct ref, return the referenced type
+	if (isset($schema['type']) && $schema['type'] === 'ref') {
+		$class = refToPhpType($schema['ref'], $nsid);
+		return ['phpType' => $class, 'docType' => $class, 'isObject' => true, 'class' => $class];
+	}
+
+	// If it's an inline object, generate a response type
+	if (isset($schema['type']) && $schema['type'] === 'object') {
+		$methodName = getMethodName($nsid);
+		$classNsid = getMethodClassNsid($nsid);
+		$ns = nsidToNamespace($classNsid);
+		$className = defToClassName($methodName).'Output';
+		$class = '\\Gimucco\\Bluesky\\Generated\\Types\\'.$ns.'\\'.$className;
+		return ['phpType' => $class, 'docType' => $class, 'isObject' => true, 'class' => $class, 'inlineSchema' => $schema, 'outputClassName' => $className, 'outputNsid' => $classNsid];
+	}
+
+	return ['phpType' => 'mixed', 'docType' => 'mixed', 'isObject' => false, 'class' => ''];
+}
+
+/**
+ * Generate response handling code by delegating to Internal\HttpResponse.
+ * The helper centralizes the status-check + JSON decode pattern that
+ * appears in every generated method.
+ */
+function generateResponseHandling(array $returnInfo): string
+{
+	if ($returnInfo['phpType'] === 'void') {
+		// No body decoding needed — just throw on error.
+		return "\t\t\\Gimucco\\Bluesky\\Internal\\HttpResponse::throwOnError(\$response);\n";
+	}
+
+	$code = "\t\t\$data = \\Gimucco\\Bluesky\\Internal\\HttpResponse::decode(\$response);\n";
+
+	if ($returnInfo['isObject'] && $returnInfo['class'] !== '') {
+		$code .= "\t\treturn {$returnInfo['class']}::fromArray(\$data);\n";
+	} else {
+		$code .= "\t\treturn \$data;\n";
+	}
+
+	return $code;
+}
+
+// ---------------------------------------------------
+// Pre-pass: Build registry of all object/record defs
+// ---------------------------------------------------
+
+$knownObjectDefs = [];
+foreach ($lexicons as $nsid => $lexicon) {
+	$defs = $lexicon['defs'] ?? [];
+	foreach ($defs as $defName => $def) {
+		$defType = $def['type'] ?? '';
+		if ($defType === 'object') {
+			$knownObjectDefs[$nsid.'#'.$defName] = true;
+		}
+		if ($defType === 'record' && isset($def['record']) && ($def['record']['type'] ?? '') === 'object') {
+			$knownObjectDefs[$nsid.'#'.$defName] = true;
+		}
+	}
+}
+
+/**
+ * Check if a ref points to a known object type.
+ */
+function isKnownObjectRef(string $ref, string $currentNsid): bool
+{
+	global $knownObjectDefs;
+	[$nsid, $defName] = resolveRef($ref, $currentNsid);
+	return isset($knownObjectDefs[$nsid.'#'.$defName]);
+}
+
+// ---------------------------------------------------
+// Process all lexicons
+// ---------------------------------------------------
+
+// Step 1: Generate type classes from all defs
+$typeFiles = [];
+foreach ($lexicons as $nsid => $lexicon) {
+	$defs = $lexicon['defs'] ?? [];
+	foreach ($defs as $defName => $def) {
+		$defType = $def['type'] ?? '';
+
+		// Generate types for object defs
+		if ($defType === 'object') {
+			$ns = nsidToNamespace($nsid);
+			$className = defToClassName($defName);
+			$path = nsidToPath($nsid);
+			$filePath = $outputDir.'/Types/'.$path.'/'.$className.'.php';
+			$code = generateTypeClass($nsid, $defName, $def, $commitSha);
+			$typeFiles[$filePath] = $code;
+			$manifest[] = "{$nsid}#{$defName} => Types/{$path}/{$className}.php";
+		}
+
+		// Generate types for record defs (the record schema inside)
+		if ($defType === 'record' && isset($def['record'])) {
+			$recordSchema = $def['record'];
+			if (($recordSchema['type'] ?? '') === 'object') {
+				$ns = nsidToNamespace($nsid);
+				$className = defToClassName($defName);
+				$path = nsidToPath($nsid);
+				$filePath = $outputDir.'/Types/'.$path.'/'.$className.'.php';
+				$code = generateTypeClass($nsid, $defName, $recordSchema, $commitSha);
+				$typeFiles[$filePath] = $code;
+				$manifest[] = "{$nsid}#{$defName} [record] => Types/{$path}/{$className}.php";
+			}
+		}
+	}
+}
+
+// Step 2: Generate inline output types for methods that return inline objects
+$methodLexicons = [];
+foreach ($lexicons as $nsid => $lexicon) {
+	$mainDef = $lexicon['defs']['main'] ?? [];
+	$mainType = $mainDef['type'] ?? '';
+
+	if ($mainType !== 'query' && $mainType !== 'procedure') {
+		continue;
+	}
+
+	$output = $mainDef['output'] ?? [];
+	if (!empty($output) && isset($output['schema']) && ($output['schema']['type'] ?? '') === 'object') {
+		$returnInfo = getReturnType($nsid, $output);
+		if (isset($returnInfo['inlineSchema'])) {
+			$classNsid = $returnInfo['outputNsid'];
+			$className = $returnInfo['outputClassName'];
+			$path = nsidToPath($classNsid);
+			$filePath = $outputDir.'/Types/'.$path.'/'.$className.'.php';
+			// Pass the original method NSID for ref resolution (e.g. #like resolves against app.bsky.feed.getLikes)
+			$code = generateTypeClass($classNsid, $className, $returnInfo['inlineSchema'], $commitSha, $nsid);
+			$typeFiles[$filePath] = $code;
+			$manifest[] = "{$nsid} [output] => Types/{$path}/{$className}.php";
+		}
+	}
+
+	$classNsid = getMethodClassNsid($nsid);
+	if (!isset($methodLexicons[$classNsid])) {
+		$methodLexicons[$classNsid] = [];
+	}
+	$methodLexicons[$classNsid][$nsid] = $mainDef;
+}
+
+// Step 3: Generate method classes
+$methodFiles = [];
+foreach ($methodLexicons as $classNsid => $methods) {
+	$ns = nsidToNamespace($classNsid);
+	$parts = explode('.', $classNsid);
+	$className = ucfirst(end($parts));
+	$fullNs = 'Gimucco\\Bluesky\\Generated\\Methods\\'.nsidToNamespace($classNsid);
+
+	// Remove the last segment since it's the class name in the namespace
+	$nsParts = explode('\\', $fullNs);
+	$className = array_pop($nsParts);
+	$fullNs = implode('\\', $nsParts);
+
+	$path = nsidToPath($classNsid);
+	$pathParts = explode('/', $path);
+	$classFileName = array_pop($pathParts);
+	$dirPath = implode('/', $pathParts);
+
+	$filePath = $outputDir.'/Methods/'.$dirPath.'/'.$classFileName.'.php';
+
+	$code = "<?php\n\n";
+	$code .= "declare(strict_types=1);\n\n";
+	$code .= "// Auto-generated by bin/generate-lexicons. Do NOT edit by hand.\n";
+	$code .= "// Commit: {$commitSha}\n\n";
+	$code .= "namespace {$fullNs};\n\n";
+	// Determine if any methods need a Generator import
+	$needsGenerator = false;
+	foreach ($methods as $methodNsid => $methodDef) {
+		if (($methodDef['type'] ?? '') !== 'query') {
+			continue;
+		}
+		$mParams = $methodDef['parameters']['properties'] ?? [];
+		$mRequired = $methodDef['parameters']['required'] ?? [];
+		$mOutput = $methodDef['output'] ?? [];
+		if (detectPaginator($methodNsid, $mParams, $mRequired, $mOutput) !== null) {
+			$needsGenerator = true;
+			break;
+		}
+	}
+
+	if ($needsGenerator) {
+		$code .= "use Generator;\n";
+	}
+	$code .= "use Gimucco\\Atproto\\Session;\n\n";
+	$code .= "final class {$className}\n{\n";
+	$code .= "\t/**\n";
+	$code .= "\t * @param Session \$session\n";
+	$code .= "\t */\n";
+	$code .= "\tpublic function __construct(\n";
+	$code .= "\t\tprivate readonly object \$session,\n";
+	$code .= "\t) {}\n";
+
+	foreach ($methods as $methodNsid => $methodDef) {
+		$code .= generateMethod($methodNsid, $methodDef, $commitSha);
+	}
+
+	$code .= "}\n";
+
+	$methodFiles[$filePath] = $code;
+	$manifest[] = "{$classNsid} => Methods/{$dirPath}/{$classFileName}.php";
+}
+
+// ---------------------------------------------------
+// Write or check files
+// ---------------------------------------------------
+
+$allFiles = array_merge($typeFiles, $methodFiles);
+
+if ($check) {
+	$mismatch = false;
+	foreach ($allFiles as $filePath => $code) {
+		if (!file_exists($filePath)) {
+			echo "MISSING: {$filePath}\n";
+			$mismatch = true;
+			continue;
+		}
+		$existing = file_get_contents($filePath);
+		if ($existing !== $code) {
+			echo "DIFFERS: {$filePath}\n";
+			$mismatch = true;
+		}
+	}
+	// Check for orphaned files
+	$existingGenerated = [];
+	if (is_dir($outputDir)) {
+		$iter = new RecursiveIteratorIterator(
+			new RecursiveDirectoryIterator($outputDir, RecursiveDirectoryIterator::SKIP_DOTS),
+		);
+		foreach ($iter as $file) {
+			if ($file->isFile() && $file->getExtension() === 'php') {
+				$existingGenerated[] = $file->getPathname();
+			}
+		}
+	}
+	foreach ($existingGenerated as $existing) {
+		if (!isset($allFiles[$existing])) {
+			echo "ORPHANED: {$existing}\n";
+			$mismatch = true;
+		}
+	}
+	if ($mismatch) {
+		echo "\nGenerated output does not match committed files.\n";
+		echo "Run bin/generate-lexicons to regenerate.\n";
+		exit(1);
+	}
+	echo "All generated files are up to date.\n";
+	exit(0);
+}
+
+// Write files
+$written = 0;
+foreach ($allFiles as $filePath => $code) {
+	$dir = dirname($filePath);
+	if (!is_dir($dir)) {
+		mkdir($dir, 0755, true);
+	}
+	file_put_contents($filePath, $code);
+	$written++;
+}
+
+// Write manifest
+sort($manifest);
+file_put_contents(
+	$lexiconsDir.'/MANIFEST.txt',
+	"Generated by bin/generate-lexicons\n"
+	."Commit: {$commitSha}\n"
+	."Date: ".date('Y-m-d H:i:s')."\n"
+	."Files: {$written}\n\n"
+	.implode("\n", $manifest)."\n",
+);
+
+echo "Generated {$written} PHP files.\n";
+echo "Types: ".count($typeFiles)." files\n";
+echo "Methods: ".count($methodFiles)." files\n";
+echo "Manifest written to lexicons/MANIFEST.txt\n";

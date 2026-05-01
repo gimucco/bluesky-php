@@ -1,0 +1,37 @@
+name: Static Analysis
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  phpstan:
+    name: PHPStan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: json, fileinfo, curl, openssl, sodium
+          coverage: none
+      - run: composer install --no-interaction --no-progress
+      - run: composer phpstan
+
+  cs-check:
+    name: Coding Standards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: json, fileinfo, curl, openssl, sodium
+          coverage: none
+      - run: composer install --no-interaction --no-progress
+      - run: composer cs-check

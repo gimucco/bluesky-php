@@ -1,0 +1,26 @@
+name: Lexicon Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  generate-check:
+    name: Generated code is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: json, fileinfo, curl, openssl, sodium
+          coverage: none
+      - run: composer install --no-interaction --no-progress
+      # Lexicon JSONs are not committed; sync from upstream before checking.
+      - run: composer sync-lexicons
+      - run: composer generate-check

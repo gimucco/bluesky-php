@@ -1,0 +1,64 @@
+{
+	"name": "gimucco/bluesky-php",
+	"description": "Bluesky / AT Protocol API client for PHP — a typed wrapper over the lexicon API, built on gimucco/atproto-php for OAuth.",
+	"type": "library",
+	"license": "GPL-2.0-or-later",
+	"authors": [
+		{
+			"name": "Gimucco",
+			"email": "info@gimucco.com",
+			"role": "Maintainer"
+		},
+		{
+			"name": "Andrea Olivato",
+			"email": "andrea@olivato.me",
+			"role": "Developer"
+		}
+	],
+	"homepage": "https://github.com/gimucco/bluesky-php",
+	"keywords": ["bluesky", "atproto", "at-protocol", "social", "api-client"],
+	"minimum-stability": "stable",
+	"prefer-stable": true,
+	"require": {
+		"php": ">=8.1",
+		"ext-fileinfo": "*",
+		"ext-json": "*",
+		"gimucco/atproto-php": "^0.1.2",
+		"psr/http-message": "^1.1 || ^2.0",
+		"psr/log": "^2.0 || ^3.0"
+	},
+	"require-dev": {
+		"phpunit/phpunit": "^10.5",
+		"phpstan/phpstan": "^2.0",
+		"phpstan/phpstan-strict-rules": "^2.0",
+		"friendsofphp/php-cs-fixer": "^3.50",
+		"guzzlehttp/guzzle": "^7.8",
+		"guzzlehttp/psr7": "^2.6"
+	},
+	"autoload": {
+		"psr-4": {
+			"Gimucco\\Bluesky\\": "src/"
+		}
+	},
+	"autoload-dev": {
+		"psr-4": {
+			"Gimucco\\Bluesky\\Tests\\": "tests/"
+		}
+	},
+	"bin": [
+		"bin/generate-lexicons",
+		"bin/sync-lexicons"
+	],
+	"scripts": {
+		"test": "phpunit",
+		"phpstan": "phpstan analyse",
+		"cs-check": "php-cs-fixer fix --dry-run --diff",
+		"cs-fix": "php-cs-fixer fix",
+		"generate": "php bin/generate-lexicons",
+		"generate-check": "php bin/generate-lexicons --check",
+		"sync-lexicons": "php bin/sync-lexicons"
+	},
+	"config": {
+		"sort-packages": true
+	}
+}

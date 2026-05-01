@@ -1,0 +1,40 @@
+# Composer
+/vendor/
+/composer.lock
+
+# Lexicon source files — fetched on demand via `composer sync-lexicons`.
+# Only the SOURCE.txt pointer and the generation MANIFEST.txt are committed.
+/lexicons/*
+!/lexicons/SOURCE.txt
+!/lexicons/MANIFEST.txt
+
+# Tool caches
+/.php-cs-fixer.cache
+/phpstan-cache/
+/.phpunit.result.cache
+/.phpunit.cache/
+
+# IDE / editor
+/.idea/
+/.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AI assistants
+/.claude/
+/.cursor/
+/.aider*
+
+# Examples — runtime artifacts and secrets (never commit)
+/examples/config.php
+/examples/private.pem
+/examples/storage/
+
+# Manual integration tests — secrets and runtime state (never commit)
+/tests/manual/config.php
+/tests/manual/private.pem
+/tests/manual/storage/
