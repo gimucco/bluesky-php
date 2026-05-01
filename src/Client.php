@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Gimucco\Bluesky;
 
+use Closure;
 use DateTimeImmutable;
 use finfo;
 use Gimucco\Atproto\Session;
@@ -15,7 +16,6 @@ use Gimucco\Bluesky\Generated\Methods\App\Bsky\Feed;
 use Gimucco\Bluesky\Generated\Methods\App\Bsky\Graph;
 use Gimucco\Bluesky\Generated\Methods\App\Bsky\Labeler;
 use Gimucco\Bluesky\Generated\Methods\App\Bsky\Notification;
-use Gimucco\Bluesky\Generated\Methods\App\Bsky\Video;
 use Gimucco\Bluesky\Generated\Methods\Com\Atproto\Identity;
 use Gimucco\Bluesky\Generated\Methods\Com\Atproto\Label;
 use Gimucco\Bluesky\Generated\Methods\Com\Atproto\Repo;
@@ -34,7 +34,7 @@ final class Client
 	public readonly Graph $graph;
 	public readonly Notification $notification;
 	public readonly Labeler $labeler;
-	public readonly Video $video;
+	public readonly VideoService $video;
 	public readonly Bookmark $bookmark;
 	public readonly Repo $repo;
 	public readonly Identity $identity;
@@ -52,6 +52,8 @@ final class Client
 	public function __construct(
 		object $session,
 		?LoggerInterface $logger = null,
+		string $videoServiceUrl = VideoService::DEFAULT_VIDEO_SERVICE_URL,
+		?Closure $videoHttpTransport = null,
 	) {
 		$this->session = $session;
 		$this->logger = $logger ?? new NullLogger();
@@ -61,11 +63,11 @@ final class Client
 		$this->graph = new Graph($session);
 		$this->notification = new Notification($session);
 		$this->labeler = new Labeler($session);
-		$this->video = new Video($session);
+		$this->server = new Server($session);
+		$this->video = new VideoService($session, $this->server, $videoServiceUrl, $videoHttpTransport);
 		$this->bookmark = new Bookmark($session);
 		$this->repo = new Repo($session);
 		$this->identity = new Identity($session);
-		$this->server = new Server($session);
 		$this->label = new Label($session);
 	}
 
@@ -272,7 +274,7 @@ final class Client
 		}
 
 		$delaySeconds = $this->threadDelaySeconds;
-		$lastIndex = count($texts) - 1;
+		$lastIndex = \count($texts) - 1;
 		$refs = [];
 		$root = null;
 		$parent = null;
@@ -547,8 +549,87 @@ final class Client
 		$blobData = Cast::toArray($output->blob, 'blob');
 
 		$blob = BlobRef::fromArray($blobData);
-		$this->logger->debug('Uploaded blob', ['mimeType' => $mimeType, 'size' => strlen($bytes), 'cid' => $blob->link]);
+		$this->logger->debug('Uploaded blob', ['mimeType' => $mimeType, 'size' => \strlen($bytes), 'cid' => $blob->link]);
 		return $blob;
+	}
+
+	/**
+	 * Upload a video and block until processing completes, returning the
+	 * resulting BlobRef ready to embed in a post via EmbeddedVideo. Mirrors
+	 * `uploadImage()` for the image case — the building block for a video
+	 * post when you want to reuse the blob (post + reply, retries, etc.).
+	 * For the simple "post a video" case use `postVideo()` instead.
+	 *
+	 * If `$mimeType` is omitted, it's detected from the bytes via fileinfo;
+	 * detection failure falls back to "video/mp4" (the lexicon default).
+	 *
+	 * **Blocks the calling thread** — see `awaitVideo()` for poll semantics.
+	 *
+	 * @throws InvalidArgumentException On empty bytes or empty MIME string.
+	 * @throws \Gimucco\Bluesky\Exception\BlueskyException On processing failure or timeout.
+	 * @throws \Gimucco\Bluesky\Exception\ApiException On HTTP failure (4xx/5xx).
+	 */
+	public function uploadVideo(string $bytes, ?string $mimeType = null, int $timeoutSeconds = 120): BlobRef
+	{
+		if ($bytes === '') {
+			throw new InvalidArgumentException('uploadVideo: $bytes must not be empty');
+		}
+		if ($mimeType === '') {
+			throw new InvalidArgumentException('uploadVideo: $mimeType must not be an empty string (pass null to auto-detect)');
+		}
+		if ($mimeType === null) {
+			$finfo = new finfo(FILEINFO_MIME_TYPE);
+			$detected = $finfo->buffer($bytes);
+			$mimeType = $detected !== false ? $detected : 'video/mp4';
+		}
+
+		$job = $this->video->uploadVideo($bytes, $mimeType);
+		$jobId = $job->jobStatus->jobId;
+		$this->logger->debug('Started video job', [
+			'jobId' => $jobId,
+			'mimeType' => $mimeType,
+			'size' => \strlen($bytes),
+		]);
+		return $this->awaitVideo($jobId, $timeoutSeconds);
+	}
+
+	/**
+	 * One-shot helper: upload a video, await processing, and post it. Returns
+	 * the PostRef of the published post. Equivalent to:
+	 *
+	 *     $blob = $client->uploadVideo($bytes, $mimeType, $timeoutSeconds);
+	 *     return $client->post($text, video: new EmbeddedVideo($blob, alt: $alt), ...);
+	 *
+	 * If you need the BlobRef for reuse (e.g. attaching the same video to
+	 * multiple posts) call `uploadVideo()` directly instead.
+	 *
+	 * **Blocks the calling thread** — same constraints as `uploadVideo()`.
+	 *
+	 * @param list<string>|null $tags
+	 * @param list<string>|null $langs
+	 *
+	 * @throws InvalidArgumentException On empty bytes or empty MIME string.
+	 * @throws \Gimucco\Bluesky\Exception\BlueskyException On processing failure or timeout.
+	 * @throws \Gimucco\Bluesky\Exception\ApiException On HTTP failure (4xx/5xx).
+	 */
+	public function postVideo(
+		string $text,
+		string $bytes,
+		string $alt = '',
+		?string $mimeType = null,
+		int $timeoutSeconds = 120,
+		?array $tags = null,
+		?array $langs = null,
+		?DateTimeImmutable $createdAt = null,
+	): PostRef {
+		$blob = $this->uploadVideo($bytes, $mimeType, $timeoutSeconds);
+		return $this->post(
+			text: $text,
+			video: new EmbeddedVideo($blob, alt: $alt),
+			tags: $tags,
+			langs: $langs,
+			createdAt: $createdAt,
+		);
 	}
 
 	/**
@@ -564,6 +645,10 @@ final class Client
 	 * not appropriate inside a synchronous web request. The default timeout
 	 * is 120s; pass a shorter $timeoutSeconds when calling from a request
 	 * with a max execution time.
+	 *
+	 * Most callers want `uploadVideo()` (returns a BlobRef directly) or
+	 * `postVideo()` (one-shot post). Use this only when you need to drive
+	 * the upload + poll loop separately.
 	 *
 	 * @throws \Gimucco\Bluesky\Exception\BlueskyException
 	 * @throws \Gimucco\Bluesky\Exception\ApiException If polling itself fails.
@@ -627,7 +712,7 @@ final class Client
 			return $this->handleToDidCache[$str];
 		}
 		$did = $this->identity->resolveHandle($str)->did;
-		if (count($this->handleToDidCache) >= self::RESOLVE_CACHE_LIMIT) {
+		if (\count($this->handleToDidCache) >= self::RESOLVE_CACHE_LIMIT) {
 			array_shift($this->handleToDidCache);  // FIFO eviction
 		}
 		$this->handleToDidCache[$str] = $did;

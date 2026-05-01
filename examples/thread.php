@@ -25,7 +25,7 @@ $refs = $client->thread(
 	'It also code-generates types for ~93 Bluesky API endpoints from the lexicons. PHPStan level 10 clean. Try it: composer require gimucco/bluesky-php',
 );
 
-echo "Posted thread of ".count($refs)." posts:\n";
+echo 'Posted thread of '.count($refs)." posts:\n";
 foreach ($refs as $i => $ref) {
-	echo "  [".($i + 1)."] {$ref->uri}\n";
+	echo '  ['.($i + 1)."] {$ref->uri}\n";
 }

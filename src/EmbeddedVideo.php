@@ -7,17 +7,15 @@ namespace Gimucco\Bluesky;
 /**
  * A video to embed in a post, with optional alt text for accessibility.
  *
- * The blob must already exist on the PDS — typically obtained from
- * Client::video->uploadVideo() and the resulting job's blob field
- * once processing has completed (poll Video::getJobStatus until
- * state is JOB_STATE_COMPLETED, then read jobStatus->blob).
+ * The blob must already exist on Bluesky's video processing service —
+ * typically obtained via `Client::uploadVideo()`, which uploads bytes
+ * and waits for processing to finish before returning the BlobRef:
  *
- *     $job = $client->video->uploadVideo($mp4Bytes);
- *     // ... poll $client->video->getJobStatus($job->jobStatus->jobId) until done ...
- *     $videoBlob = \Gimucco\Bluesky\BlobRef::fromArray(
- *         \Gimucco\Bluesky\Internal\Cast::toArray($completedJob->blob)
- *     );
- *     $client->post('Watch this', video: new EmbeddedVideo($videoBlob, alt: '...'));
+ *     $blob = $client->uploadVideo(file_get_contents('clip.mp4'));
+ *     $client->post('Watch this', video: new EmbeddedVideo($blob, alt: '...'));
+ *
+ * For the simple "post a video" case, `Client::postVideo()` combines
+ * upload + post into a single call.
  */
 final class EmbeddedVideo
 {

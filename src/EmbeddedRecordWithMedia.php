@@ -34,8 +34,8 @@ final class EmbeddedRecordWithMedia
 		if ($hasImages && $hasVideo) {
 			throw new InvalidArgumentException('EmbeddedRecordWithMedia accepts images OR video, not both');
 		}
-		if ($hasImages && count($images) > 4) {
-			throw new InvalidArgumentException('A post can include at most 4 images (got '.count($images).')');
+		if ($hasImages && \count($images) > 4) {
+			throw new InvalidArgumentException('A post can include at most 4 images (got '.\count($images).')');
 		}
 	}
 }

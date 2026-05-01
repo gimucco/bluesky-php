@@ -22,8 +22,8 @@ class ApiException extends BlueskyException
 	 */
 	public static function fromResponse(int $status, array $body): self
 	{
-		$error = is_string($body['error'] ?? null) ? $body['error'] : 'Unknown';
-		$message = is_string($body['message'] ?? null) ? $body['message'] : 'Unknown error';
+		$error = \is_string($body['error'] ?? null) ? $body['error'] : 'Unknown';
+		$message = \is_string($body['message'] ?? null) ? $body['message'] : 'Unknown error';
 
 		return match (true) {
 			$status === 404 => new NotFoundException($status, $error, $message),

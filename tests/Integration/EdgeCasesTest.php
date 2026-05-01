@@ -63,6 +63,7 @@ final class EdgeCasesTest extends TestCase
 		// Real 1x1 transparent PNG (smallest valid PNG, finfo recognizes it).
 		$pngBytes = base64_decode(
 			'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+			true,
 		);
 		self::assertNotFalse($pngBytes);
 

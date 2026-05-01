@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 (no changes yet)
 
+## [0.2.1] - 2026-05-01
+
+### Fixed
+
+- **Video upload now actually works.** Previously, `$client->video->uploadVideo()`, `getJobStatus()`, and `getUploadLimits()` posted to `<pdsUrl>/xrpc/app.bsky.video.*` — Bluesky does not implement video on the PDS, so calls against `bsky.social`-hosted accounts (the vast majority) returned **HTTP 501 "Method Not Implemented"**. Calls now route to the Bluesky video processing service at `https://video.bsky.app`, with a per-call service-auth JWT minted via `com.atproto.server.getServiceAuth` (audience auto-derived as `did:web:<host>` from the configured URL, `lxm=app.bsky.video.<method>`, 30s expiry). Matches the routing behavior of the official `@atproto/api` TypeScript SDK.
+- `Client::awaitVideo($jobId)` now resolves to a real `BlobRef` end-to-end (the polling loop was correct but unreachable while `getJobStatus` was failing on the PDS).
+
+### Added
+
+- **`Client::postVideo(string $text, string $bytes, string $alt = '', ...): PostRef`** — one-shot helper that uploads, awaits processing, and posts in a single call. Accepts the same `tags` / `langs` / `createdAt` options as `post()`. Was on the v0.2 roadmap.
+- **`Client::uploadVideo(string $bytes, ?string $mimeType = null, int $timeoutSeconds = 120): BlobRef`** — mirrors `uploadImage()` for the video case. Auto-detects MIME via fileinfo if omitted (falls back to `video/mp4`). Combines `video->uploadVideo()` + `awaitVideo()` into one call returning a ready-to-embed `BlobRef`. Use this when you want to reuse the blob (post + reply, retries, `recordWithMedia` quotes); use `postVideo()` for the simple one-shot.
+- `Gimucco\Bluesky\VideoService` — hand-written wrapper for the three video methods, plumbed into `Client::$video`. Lives outside `src/Generated/`, so a future lexicon regen will not overwrite the fix.
+- Optional `Client` constructor parameters: `string $videoServiceUrl = 'https://video.bsky.app'` (override for hypothetical third-party video services — service DID is auto-derived as `did:web:<host>` so service-auth tokens are minted with the correct audience) and `?Closure $videoHttpTransport = null` (testing seam — the curl transport is the default).
+- Curl transport now sets explicit timeouts: **10s connect**, **120s total** for `uploadVideo`, **30s total** for `getJobStatus` / `getUploadLimits`. Explicit `CURLOPT_SSL_VERIFY{PEER,HOST}` and `CURLOPT_FOLLOWLOCATION = false` for defense-in-depth against weird local php.ini overrides. No more risk of a hung connection blocking a worker forever.
+- Curl transport now handles non-JSON error responses gracefully — a 502 from a CDN upstream returning HTML used to crash with `JsonException`; it now raises the appropriate `ApiException` subclass (`ServerException` for 5xx, etc.) with whatever status was received.
+- `?name=` query param on `uploadVideo` now reflects the MIME type (`video.mp4` / `video.webm` / `video.mov` / `video.mpeg`) for readable server-side logs.
+- 9 new tests covering service-auth minting, per-method `lxm` binding, fresh-token-per-call, custom `videoServiceUrl` with derived service DID, MIME-aware filename, distinct upload/status timeouts, URL validation, and the new `Client::uploadVideo` / `Client::postVideo` happy paths + input validation. Existing video tests updated for the new routing. **141 tests / 433 assertions** total (was 122 / 363).
+- `tests/manual/video-upload.php` — real-account smoke test for the end-to-end flow (upload → post → cleanup). Listed in `tests/manual/README.md`.
+
+### Changed
+
+- `Client::$video` is now typed as `Gimucco\Bluesky\VideoService` (was `Gimucco\Bluesky\Generated\Methods\App\Bsky\Video`). The three public methods (`uploadVideo`, `getJobStatus`, `getUploadLimits`) keep identical signatures and return types, so callers using `$client->video->...` are unaffected. Code that explicitly type-hints against the generated `Video` class (rare — it is an internal of the lexicon-generated layer) needs to switch to `VideoService`.
+- `examples/video-upload.php` simplified to use `$client->postVideo(...)` directly.
+- `.php-cs-fixer.dist.php` aligned with `gimucco/atproto-php`'s config: adds `@PER-CS2.0:risky`, `strict_param`, and `native_function_invocation` (with `@compiler_optimized` scope, `strict: true`); drops `global_namespace_import` (atproto-php does not use it). Mechanical `\` prefixes added to compiler-optimized native calls (`\count`, `\strlen`, `\sprintf`, `\is_*`) across 14 existing files — runtime behavior unchanged.
+
 ## [0.2.0] - 2026-05-01
 
 ### Changed

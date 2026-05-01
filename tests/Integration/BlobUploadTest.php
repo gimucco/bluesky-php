@@ -31,6 +31,7 @@ final class BlobUploadTest extends TestCase
 		// 1×1 pixel JPEG header — enough that finfo detects "image/jpeg".
 		$jpegBytes = base64_decode(
 			'/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/2wBDAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AL+f/9k=',
+			true,
 		);
 		self::assertNotFalse($jpegBytes);
 
@@ -222,29 +223,44 @@ final class BlobUploadTest extends TestCase
 	}
 
 	#[Test]
-	public function uploadVideoUsesRawRequestWithLexiconDefaultMime(): void
+	public function uploadVideoRoutesToVideoServiceWithServiceAuth(): void
 	{
 		$session = new FakeSession();
-		$session->queueResponse(200, [
-			'jobStatus' => [
-				'jobId' => 'abc123',
-				'did' => 'did:plc:testuser',
-				'state' => 'JOB_STATE_PROCESSING',
-			],
-		]);
+		// Queue getServiceAuth response (called on PDS via Session)
+		$session->queueResponse(200, ['token' => 'service-jwt-for-upload']);
 
-		$client = new Client($session);
-		// uploadVideo signature: (string $bytes, string $mimeType = 'video/mp4')
+		$transportRequests = [];
+		$fakeTransport = static function (string $method, string $url, string $token, ?string $body, ?string $contentType, int $timeoutSeconds) use (&$transportRequests): array {
+			$transportRequests[] = compact('method', 'url', 'token', 'body', 'contentType', 'timeoutSeconds');
+			return [
+				'jobStatus' => [
+					'jobId' => 'abc123',
+					'did' => 'did:plc:testuser',
+					'state' => 'JOB_STATE_PROCESSING',
+				],
+			];
+		};
+
+		$client = new Client($session, videoHttpTransport: $fakeTransport);
 		$result = $client->video->uploadVideo('FAKE_VIDEO_BYTES');
 
 		self::assertSame('abc123', $result->jobStatus->jobId);
 
-		$req = $session->lastRequest();
-		self::assertNotNull($req);
-		self::assertSame('POST', $req['method']);
-		self::assertStringContainsString('app.bsky.video.uploadVideo', $req['url']);
-		self::assertSame('FAKE_VIDEO_BYTES', $req['body']);
-		self::assertSame('video/mp4', $req['contentType'] ?? null);
+		// Verify getServiceAuth was called on PDS
+		$authReq = $session->requests[0];
+		self::assertStringContainsString('com.atproto.server.getServiceAuth', $authReq['url']);
+		self::assertStringContainsString('did%3Aweb%3Avideo.bsky.app', $authReq['url']);
+		self::assertStringContainsString('app.bsky.video.uploadVideo', $authReq['url']);
+
+		// Verify video upload was sent to video.bsky.app with Bearer token
+		self::assertCount(1, $transportRequests);
+		$vidReq = $transportRequests[0];
+		self::assertSame('POST', $vidReq['method']);
+		self::assertStringStartsWith('https://video.bsky.app/xrpc/app.bsky.video.uploadVideo', $vidReq['url']);
+		self::assertStringContainsString('did=did%3Aplc%3Atestuser', $vidReq['url']);
+		self::assertSame('service-jwt-for-upload', $vidReq['token']);
+		self::assertSame('FAKE_VIDEO_BYTES', $vidReq['body']);
+		self::assertSame('video/mp4', $vidReq['contentType']);
 	}
 
 	#[Test]

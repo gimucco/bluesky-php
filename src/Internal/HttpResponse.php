@@ -49,6 +49,6 @@ final class HttpResponse
 			return;
 		}
 		$body = json_decode((string) $response->getBody(), true);
-		throw ApiException::fromResponse($status, is_array($body) ? Cast::toArray($body) : []);
+		throw ApiException::fromResponse($status, \is_array($body) ? Cast::toArray($body) : []);
 	}
 }

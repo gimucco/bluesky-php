@@ -25,7 +25,7 @@ final class AtUri implements Stringable
 		}
 		$path = substr($value, 5);
 		$parts = explode('/', $path);
-		if (count($parts) !== 3 || $parts[0] === '' || $parts[1] === '' || $parts[2] === '') {
+		if (\count($parts) !== 3 || $parts[0] === '' || $parts[1] === '' || $parts[2] === '') {
 			throw new InvalidArgumentException('AT-URI must have format "at://authority/collection/rkey": '.$value);
 		}
 		$this->value = $value;

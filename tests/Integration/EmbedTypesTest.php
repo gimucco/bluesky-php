@@ -187,24 +187,29 @@ final class EmbedTypesTest extends TestCase
 	public function awaitVideoReturnsBlobOnCompletion(): void
 	{
 		$session = new FakeSession();
-		// Two polls: first PROCESSING, second COMPLETED.
-		$session->queueResponse(200, [
-			'jobStatus' => ['jobId' => 'j1', 'did' => 'did:plc:testuser', 'state' => 'JOB_STATE_PROCESSING', 'progress' => 50],
-		]);
-		$session->queueResponse(200, [
-			'jobStatus' => [
+		// Each getJobStatus call triggers a getServiceAuth on the PDS first.
+		$session->queueResponse(200, ['token' => 'svc-token-1']);
+		$session->queueResponse(200, ['token' => 'svc-token-2']);
+
+		$pollResponses = [
+			['jobStatus' => ['jobId' => 'j1', 'did' => 'did:plc:testuser', 'state' => 'JOB_STATE_PROCESSING', 'progress' => 50]],
+			['jobStatus' => [
 				'jobId' => 'j1', 'did' => 'did:plc:testuser', 'state' => 'JOB_STATE_COMPLETED',
 				'blob' => ['$type' => 'blob', 'ref' => ['$link' => 'bafkreidone'], 'mimeType' => 'video/mp4', 'size' => 12345],
-			],
-		]);
+			]],
+		];
+		$callIndex = 0;
+		$fakeTransport = static function () use (&$pollResponses, &$callIndex): array {
+			return $pollResponses[$callIndex++];
+		};
 
-		$client = new Client($session);
-		// Use 0-second initial poll to keep test fast.
+		$client = new Client($session, videoHttpTransport: $fakeTransport);
 		$blob = $client->awaitVideo('j1', timeoutSeconds: 60, initialPollSeconds: 0);
 
 		self::assertSame('bafkreidone', $blob->link);
 		self::assertSame('video/mp4', $blob->mimeType);
 		self::assertSame(12345, $blob->size);
+		// Two getServiceAuth calls on the PDS
 		self::assertCount(2, $session->requests);
 	}
 
@@ -212,14 +217,16 @@ final class EmbedTypesTest extends TestCase
 	public function awaitVideoThrowsOnFailedState(): void
 	{
 		$session = new FakeSession();
-		$session->queueResponse(200, [
+		$session->queueResponse(200, ['token' => 'svc-token']);
+
+		$fakeTransport = static fn() => [
 			'jobStatus' => [
 				'jobId' => 'jbad', 'did' => 'did:plc:testuser', 'state' => 'JOB_STATE_FAILED',
 				'error' => 'invalid codec',
 			],
-		]);
+		];
 
-		$client = new Client($session);
+		$client = new Client($session, videoHttpTransport: $fakeTransport);
 
 		$this->expectException(BlueskyException::class);
 		$this->expectExceptionMessage('invalid codec');
@@ -230,11 +237,13 @@ final class EmbedTypesTest extends TestCase
 	public function awaitVideoThrowsOnCompletedWithoutBlob(): void
 	{
 		$session = new FakeSession();
-		$session->queueResponse(200, [
-			'jobStatus' => ['jobId' => 'jodd', 'did' => 'did:plc:testuser', 'state' => 'JOB_STATE_COMPLETED'],
-		]);
+		$session->queueResponse(200, ['token' => 'svc-token']);
 
-		$client = new Client($session);
+		$fakeTransport = static fn() => [
+			'jobStatus' => ['jobId' => 'jodd', 'did' => 'did:plc:testuser', 'state' => 'JOB_STATE_COMPLETED'],
+		];
+
+		$client = new Client($session, videoHttpTransport: $fakeTransport);
 
 		$this->expectException(BlueskyException::class);
 		$this->expectExceptionMessage('blob is missing');
@@ -245,18 +254,106 @@ final class EmbedTypesTest extends TestCase
 	public function awaitVideoThrowsOnTimeout(): void
 	{
 		$session = new FakeSession();
-		// Always respond with PROCESSING — never completes.
+		// Queue enough service-auth tokens for the polling attempts.
 		for ($i = 0; $i < 5; $i++) {
-			$session->queueResponse(200, [
-				'jobStatus' => ['jobId' => 'jstuck', 'did' => 'did:plc:testuser', 'state' => 'JOB_STATE_PROCESSING'],
-			]);
+			$session->queueResponse(200, ['token' => 'svc-token-'.$i]);
 		}
 
-		$client = new Client($session);
+		$fakeTransport = static fn() => [
+			'jobStatus' => ['jobId' => 'jstuck', 'did' => 'did:plc:testuser', 'state' => 'JOB_STATE_PROCESSING'],
+		];
+
+		$client = new Client($session, videoHttpTransport: $fakeTransport);
 
 		$this->expectException(BlueskyException::class);
 		$this->expectExceptionMessage('did not complete within');
-		// Zero timeout + zero poll → first iteration runs, then deadline check fires.
 		$client->awaitVideo('jstuck', timeoutSeconds: 0, initialPollSeconds: 0);
+	}
+
+	#[Test]
+	public function clientUploadVideoReturnsBlobAfterAwait(): void
+	{
+		$session = new FakeSession();
+		// uploadVideo: getServiceAuth + transport. awaitVideo poll: getServiceAuth + transport.
+		$session->queueResponse(200, ['token' => 'jwt-upload']);
+		$session->queueResponse(200, ['token' => 'jwt-status']);
+
+		$callIndex = 0;
+		$responses = [
+			['jobStatus' => ['jobId' => 'jx', 'did' => 'did:plc:testuser', 'state' => 'JOB_STATE_PROCESSING']],
+			['jobStatus' => [
+				'jobId' => 'jx', 'did' => 'did:plc:testuser', 'state' => 'JOB_STATE_COMPLETED',
+				'blob' => ['$type' => 'blob', 'ref' => ['$link' => 'bafkreivid'], 'mimeType' => 'video/mp4', 'size' => 999],
+			]],
+		];
+		$fakeTransport = static function () use (&$callIndex, $responses): array {
+			return $responses[$callIndex++];
+		};
+
+		$client = new Client($session, videoHttpTransport: $fakeTransport);
+		$blob = $client->uploadVideo('FAKE_MP4_BYTES', 'video/mp4', timeoutSeconds: 30);
+
+		self::assertSame('bafkreivid', $blob->link);
+		self::assertSame('video/mp4', $blob->mimeType);
+		self::assertSame(999, $blob->size);
+	}
+
+	#[Test]
+	public function clientUploadVideoRejectsEmptyBytes(): void
+	{
+		$client = new Client(new FakeSession());
+		$this->expectException(InvalidArgumentException::class);
+		$client->uploadVideo('');
+	}
+
+	#[Test]
+	public function clientUploadVideoRejectsEmptyMimeType(): void
+	{
+		$client = new Client(new FakeSession());
+		$this->expectException(InvalidArgumentException::class);
+		$client->uploadVideo('bytes', '');
+	}
+
+	#[Test]
+	public function clientPostVideoUploadsAwaitsAndPosts(): void
+	{
+		$session = new FakeSession();
+		// 1. getServiceAuth (upload), 2. getServiceAuth (status poll), 3. createRecord
+		$session->queueResponse(200, ['token' => 'jwt-upload']);
+		$session->queueResponse(200, ['token' => 'jwt-status']);
+		$session->queueResponse(200, [
+			'uri' => 'at://did:plc:testuser/app.bsky.feed.post/posted',
+			'cid' => 'bafyreipostvid',
+		]);
+
+		$callIndex = 0;
+		$responses = [
+			// 1) upload returns a job in PROCESSING
+			['jobStatus' => [
+				'jobId' => 'one-shot', 'did' => 'did:plc:testuser', 'state' => 'JOB_STATE_PROCESSING',
+			]],
+			// 2) await poll: COMPLETED with the resulting blob
+			['jobStatus' => [
+				'jobId' => 'one-shot', 'did' => 'did:plc:testuser', 'state' => 'JOB_STATE_COMPLETED',
+				'blob' => ['$type' => 'blob', 'ref' => ['$link' => 'bafkreione'], 'mimeType' => 'video/mp4', 'size' => 1234],
+			]],
+		];
+		$fakeTransport = static function () use (&$callIndex, $responses): array {
+			return $responses[$callIndex++];
+		};
+
+		$client = new Client($session, videoHttpTransport: $fakeTransport);
+		$ref = $client->postVideo('Watch this', 'BYTES', alt: 'A test clip', mimeType: 'video/mp4', timeoutSeconds: 30);
+
+		self::assertSame('at://did:plc:testuser/app.bsky.feed.post/posted', $ref->uri);
+
+		// Verify the createRecord call carries the video embed with our blob + alt.
+		$createReq = $session->requests[2];
+		self::assertStringContainsString('com.atproto.repo.createRecord', $createReq['url']);
+		self::assertIsArray($createReq['body']);
+		$embed = $createReq['body']['record']['embed'];
+		self::assertSame('app.bsky.embed.video', $embed['$type']);
+		self::assertSame('bafkreione', $embed['video']['ref']['$link']);
+		self::assertSame('A test clip', $embed['alt']);
 	}
 }

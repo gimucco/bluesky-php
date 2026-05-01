@@ -57,7 +57,7 @@ final class EmbedBuilder
 			'quoting' => $quoting !== null,
 		]));
 
-		if (count($present) > 1) {
+		if (\count($present) > 1) {
 			throw new InvalidArgumentException(
 				'A post can carry at most one embed; got: '.implode(', ', $present),
 			);
@@ -82,9 +82,9 @@ final class EmbedBuilder
 	 */
 	private function images(array $images): array
 	{
-		if (count($images) > self::MAX_IMAGES_PER_POST) {
+		if (\count($images) > self::MAX_IMAGES_PER_POST) {
 			throw new InvalidArgumentException(
-				'A post can include at most '.self::MAX_IMAGES_PER_POST.' images (got '.count($images).')',
+				'A post can include at most '.self::MAX_IMAGES_PER_POST.' images (got '.\count($images).')',
 			);
 		}
 		$imageRecords = [];

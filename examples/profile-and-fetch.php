@@ -23,7 +23,7 @@ if ($me->displayName !== null) {
 	echo " ({$me->displayName})";
 }
 echo "\n  did: {$me->did}\n";
-echo "  followers: ".($me->followersCount ?? 0).", following: ".($me->followsCount ?? 0).", posts: ".($me->postsCount ?? 0)."\n";
+echo '  followers: '.($me->followersCount ?? 0).', following: '.($me->followsCount ?? 0).', posts: '.($me->postsCount ?? 0)."\n";
 
 $other = examples_arg(2);
 if ($other !== null) {
@@ -45,6 +45,6 @@ if ($other !== null) {
 		$text = is_array($single->record) && isset($single->record['text']) && is_string($single->record['text'])
 			? $single->record['text']
 			: '';
-		echo "  text: ".mb_substr($text, 0, 140)."\n";
+		echo '  text: '.mb_substr($text, 0, 140)."\n";
 	}
 }

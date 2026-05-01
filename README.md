@@ -24,6 +24,7 @@ $client = new Client($session);   // session restored from atproto-php OAuth flo
 
 $client->post('Hello world');
 $client->post('With image', images: [new EmbeddedImage($blob, alt: 'A sunset')]);
+$client->postVideo('Watch this', $videoBytes, alt: 'A clip');   // upload + await + post
 $client->thread('First', 'Second', 'Third');
 $client->reply($parentUri, $parentCid, 'Great post!');
 $client->like($postUri, $postCid);
@@ -42,7 +43,7 @@ $post = $client->getPost($uri);
 | **Engagement** | `like()` / `unlike()`, `repost()` / `unrepost()` |
 | **Social graph** | `follow()` / `unfollow()`, `block()` / `unblock()`, `mute()` / `unmute()` |
 | **Reading** | `myProfile()`, `getPost()` |
-| **Media uploads** | `uploadImage()`, `video->uploadVideo()`, `awaitVideo()` |
+| **Media uploads** | `uploadImage()`, `uploadVideo()`, `postVideo()`, `awaitVideo()` |
 | **Pagination** | `feed->paginateTimeline()`, `graph->paginateFollowers()`, … (28 auto-generated) + `Pager::iterate()` for custom shapes |
 | **Lexicon API** | `$client->actor`, `$client->feed`, `$client->graph`, `$client->notification`, `$client->repo`, `$client->identity`, `$client->server`, `$client->label`, `$client->video`, `$client->bookmark`, `$client->labeler` |
 | **Identifiers** | `Did`, `Handle`, `AtUri` (validated, `Stringable`) |
@@ -214,15 +215,25 @@ Empty bytes or empty MIME string throws `InvalidArgumentException`.
 
 ### Video
 
-Bluesky processes videos asynchronously. The full flow:
+Bluesky processes videos asynchronously, but the convenience methods hide the polling. Three levels of API, in order of decreasing convenience:
 
 ```php
-$job = $client->video->uploadVideo(file_get_contents('clip.mp4'));
-$videoBlob = $client->awaitVideo($job->jobStatus->jobId);   // polls with backoff
-$client->post('Watch this', video: new EmbeddedVideo($videoBlob, alt: '...'));
+// One-shot: upload + await + post.
+$ref = $client->postVideo('Watch this', $bytes, alt: 'A clip');
+
+// Returns a BlobRef — for reuse (same video on multiple posts, retries, recordWithMedia, etc.)
+$blob = $client->uploadVideo($bytes);
+$client->post('Watch this', video: new EmbeddedVideo($blob, alt: '...'));
+$client->reply($parent, $cid, 'see this', video: new EmbeddedVideo($blob));
+
+// Lowest level: drive the upload + poll loop yourself.
+$job = $client->video->uploadVideo($bytes);
+$blob = $client->awaitVideo($job->jobStatus->jobId, timeoutSeconds: 60);
 ```
 
-`awaitVideo()` blocks until completion (default 120s timeout, exponential backoff capped at 10s/poll). Use only in CLI / cron / queue contexts — pass a smaller `timeoutSeconds` from any sync web request.
+All three **block the calling thread** — fine for CLI / cron / queue, not appropriate inside a synchronous web request. The default await timeout is 120 s (exponential backoff capped at 10 s/poll); pass a smaller `timeoutSeconds` from a request with a max execution budget.
+
+Video calls do **not** go to the user's PDS — Bluesky operates a dedicated video processing service at `https://video.bsky.app`. The library handles routing transparently: each call mints a short-lived per-method service-auth JWT via the user's PDS (`com.atproto.server.getServiceAuth`) and sends it as a plain bearer token to the video service. The HTTP path uses curl with explicit timeouts (10 s connect, 120 s total upload, 30 s status) and SSL verification on. If you run against a third-party PDS that operates its own video service, pass `videoServiceUrl: 'https://your-video-service'` to `new Client(...)` — the service DID is auto-derived as `did:web:<host>` so service-auth tokens are minted with the correct audience.
 
 ## Engagement
 

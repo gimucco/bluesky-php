@@ -186,7 +186,7 @@ final class RichTextTest extends TestCase
 			return 'did:plc:'.str_replace('.', '_', $handle);
 		});
 
-		self::assertSame(RichText::MAX_MENTIONS, count($facets));
+		self::assertSame(RichText::MAX_MENTIONS, \count($facets));
 		self::assertSame(RichText::MAX_MENTIONS, $resolved);
 	}
 

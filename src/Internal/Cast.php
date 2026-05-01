@@ -21,13 +21,13 @@ final class Cast
 {
 	public static function toString(mixed $value, string $field = ''): string
 	{
-		if (is_string($value)) {
+		if (\is_string($value)) {
 			return $value;
 		}
-		if (is_int($value) || is_float($value)) {
+		if (\is_int($value) || \is_float($value)) {
 			return (string) $value;
 		}
-		if (is_bool($value)) {
+		if (\is_bool($value)) {
 			return $value ? 'true' : 'false';
 		}
 		throw new LexiconException(self::msg('string', $value, $field));
@@ -35,10 +35,10 @@ final class Cast
 
 	public static function toInt(mixed $value, string $field = ''): int
 	{
-		if (is_int($value)) {
+		if (\is_int($value)) {
 			return $value;
 		}
-		if (is_string($value) && is_numeric($value)) {
+		if (\is_string($value) && is_numeric($value)) {
 			return (int) $value;
 		}
 		throw new LexiconException(self::msg('int', $value, $field));
@@ -46,7 +46,7 @@ final class Cast
 
 	public static function toBool(mixed $value, string $field = ''): bool
 	{
-		if (is_bool($value)) {
+		if (\is_bool($value)) {
 			return $value;
 		}
 		if ($value === 0 || $value === 1) {
@@ -63,7 +63,7 @@ final class Cast
 	 */
 	public static function toArray(mixed $value, string $field = ''): array
 	{
-		if (is_array($value)) {
+		if (\is_array($value)) {
 			/** @var array<string, mixed> $value */
 			return $value;
 		}
@@ -75,7 +75,7 @@ final class Cast
 	 */
 	public static function toList(mixed $value, string $field = ''): array
 	{
-		if (is_array($value)) {
+		if (\is_array($value)) {
 			return array_values($value);
 		}
 		throw new LexiconException(self::msg('list', $value, $field));
@@ -85,7 +85,7 @@ final class Cast
 	{
 		$got = get_debug_type($value);
 		return $field !== ''
-			? sprintf('Field "%s": expected %s, got %s', $field, $expected, $got)
-			: sprintf('Expected %s, got %s', $expected, $got);
+			? \sprintf('Field "%s": expected %s, got %s', $field, $expected, $got)
+			: \sprintf('Expected %s, got %s', $expected, $got);
 	}
 }

@@ -21,7 +21,7 @@ final class Did implements Stringable
 			throw new InvalidArgumentException('DID must start with "did:": '.$value);
 		}
 		$parts = explode(':', $value, 3);
-		if (count($parts) !== 3 || $parts[1] === '' || $parts[2] === '') {
+		if (\count($parts) !== 3 || $parts[1] === '' || $parts[2] === '') {
 			throw new InvalidArgumentException('DID must have format "did:method:identifier": '.$value);
 		}
 		$this->value = $value;

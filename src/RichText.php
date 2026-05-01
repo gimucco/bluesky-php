@@ -80,7 +80,7 @@ final class RichText
 			$fullMatch = $match[0];
 			$handle = $matches[1][$i][0];
 			$byteStart = $match[1];
-			$byteEnd = $byteStart + strlen($fullMatch);
+			$byteEnd = $byteStart + \strlen($fullMatch);
 
 			try {
 				$did = $resolveHandle($handle);
@@ -121,7 +121,7 @@ final class RichText
 		foreach ($matches[0] as $match) {
 			$url = $match[0];
 			$byteStart = $match[1];
-			$byteEnd = $byteStart + strlen($url);
+			$byteEnd = $byteStart + \strlen($url);
 
 			$facets[] = [
 				'index' => [
@@ -154,7 +154,7 @@ final class RichText
 			$fullMatch = $match[0];
 			$tag = $matches[1][$i][0];
 			$byteStart = $match[1];
-			$byteEnd = $byteStart + strlen($fullMatch);
+			$byteEnd = $byteStart + \strlen($fullMatch);
 
 			$facets[] = [
 				'index' => [
